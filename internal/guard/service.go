@@ -1,0 +1,403 @@
+// Package guard owns a fail-closed local proxy. OS enforcement is a separate prerequisite.
+package guard
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/netip"
+	"runtime"
+	"sync"
+	"time"
+
+	"exitguard/internal/enforce"
+	"exitguard/internal/model"
+)
+
+type route interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+	Fingerprint(context.Context) (string, error)
+	Probe(context.Context, string) (string, error)
+	Close() error
+}
+type Service struct {
+	mu             sync.Mutex
+	checkMu        sync.Mutex
+	configPath     string
+	config         model.Config
+	status         model.Status
+	secret         string
+	events         []model.Event
+	generation     uint64
+	connections    map[net.Conn]struct{}
+	activeRoute    route
+	fingerprint    string
+	inspect        func(context.Context, enforce.Policy) (enforce.Proof, error)
+	makeRoute      func(model.Config, string) (route, error)
+	running        bool
+	listener       net.Listener
+	boundPort      uint16
+	controlHandler http.Handler
+	readySignal    chan struct{}
+	started        bool
+	cancelCheck    context.CancelFunc
+	cancelHealth   context.CancelFunc
+}
+
+func New(configPath string) (*Service, error) {
+	c, e := loadConfig(configPath)
+	if e != nil {
+		return nil, e
+	}
+	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute}
+	s.status = model.Status{State: "unconfigured", Reason: "尚未验证出口与系统过滤，受保护入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c)}
+	return s, nil
+}
+func (s *Service) Config() model.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return copyConfig(s.config)
+}
+func (s *Service) Status() model.Status { s.mu.Lock(); defer s.mu.Unlock(); return s.status }
+func (s *Service) Events() []model.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]model.Event(nil), s.events...)
+}
+func (s *Service) eventLocked(message string) {
+	s.events = append(s.events, model.Event{At: time.Now().UTC().Format(time.RFC3339), State: s.status.State, Message: message})
+	if len(s.events) > 100 {
+		s.events = append([]model.Event(nil), s.events[len(s.events)-100:]...)
+	}
+}
+func (s *Service) closeLocked() {
+	if s.cancelCheck != nil {
+		s.cancelCheck()
+		s.cancelCheck = nil
+	}
+	if s.cancelHealth != nil {
+		s.cancelHealth()
+		s.cancelHealth = nil
+	}
+	s.generation++
+	for c := range s.connections {
+		_ = c.Close()
+		delete(s.connections, c)
+	}
+	if s.activeRoute != nil {
+		_ = s.activeRoute.Close()
+		s.activeRoute = nil
+	}
+	s.fingerprint = ""
+}
+func (s *Service) SaveConfig(c model.Config) error {
+	c = defaults(copyConfig(c))
+	if e := validateConfig(c, false); e != nil {
+		return e
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked()
+	if s.running && c.ProxyPort != s.config.ProxyPort {
+		s.status.State = "blocked"
+		s.status.Reason = "运行中不能更改守护端口，请先停止服务再修改配置"
+		s.eventLocked(s.status.Reason)
+		return errors.New(s.status.Reason)
+	}
+	s.status.State = "unconfigured"
+	s.status.FilterActive = false
+	s.status.PolicyHash = ""
+	s.status.ObservedIP = ""
+	s.status.Reason = "配置已变化，需要重新验证"
+	if e := persistConfig(s.configPath, c); e != nil {
+		s.status.State = "blocked"
+		s.status.Reason = e.Error()
+		s.eventLocked("配置保存失败，入口已关闭")
+		return e
+	}
+	s.config = c
+	s.status.ProxyAddress = proxyAddress(c)
+	s.eventLocked("配置已保存，入口已关闭")
+	return nil
+}
+func (s *Service) SetSecret(secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked()
+	s.secret = secret
+	s.status.State = "unconfigured"
+	s.status.FilterActive = false
+	s.status.Reason = "控制凭证已更新，需要重新验证"
+	s.eventLocked("会话凭证已更新")
+}
+func (s *Service) Disarm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked()
+	s.status.State = "stopped"
+	s.status.Reason = "保护入口已暂停"
+	s.eventLocked(s.status.Reason)
+}
+func (s *Service) block(g uint64, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generation != g {
+		return errors.New("验证已取消，需要重新检查")
+	}
+	s.closeLocked()
+	s.status.State = "blocked"
+	s.status.Reason = reason
+	s.status.FilterActive = false
+	s.eventLocked(reason)
+	return errors.New(reason)
+}
+func policy(c model.Config) enforce.Policy {
+	return enforce.Policy{Port: c.ProxyPort, Programs: c.Programs, BundleIDs: c.BundleIDs}
+}
+func expected(c model.Config, raw string) bool {
+	ip, e := netip.ParseAddr(raw)
+	if e != nil {
+		return false
+	}
+	for _, v := range c.ExpectedIPs {
+		want, e := netip.ParseAddr(v)
+		if e == nil && want.Unmap() == ip.Unmap() {
+			return true
+		}
+	}
+	return false
+}
+func (s *Service) Check(ctx context.Context) error { return s.validate(ctx, false) }
+func (s *Service) Arm(ctx context.Context) error   { return s.validate(ctx, true) }
+func (s *Service) validate(ctx context.Context, arm bool) error {
+	if !s.checkMu.TryLock() {
+		return errors.New("已有验证任务正在运行，请等待或暂停")
+	}
+	defer s.checkMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	s.closeLocked()
+	g := s.generation
+	s.cancelCheck = cancel
+	c := copyConfig(s.config)
+	secret := s.secret
+	s.status.State = "checking"
+	s.status.Reason = "正在核验系统过滤与专用出口"
+	s.status.FilterActive = false
+	s.status.ObservedIP = ""
+	s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	s.mu.Unlock()
+	if arm {
+		s.mu.Lock()
+		owned := s.running && s.listener != nil && s.boundPort == c.ProxyPort
+		s.mu.Unlock()
+		if !owned {
+			return s.block(g, "守护服务尚未独占当前配置端口，无法启用保护")
+		}
+	}
+	if e := validateConfig(c, true); e != nil {
+		return s.block(g, e.Error())
+	}
+	proof, e := s.inspect(ctx, policy(c))
+	if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
+		return s.block(g, "系统过滤未安装、未启用或与当前目标配置不匹配")
+	}
+	r, e := s.makeRoute(c, secret)
+	if e != nil {
+		return s.block(g, e.Error())
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = r.Close()
+		}
+	}()
+	before, e := r.Fingerprint(ctx)
+	if e != nil || before == "" {
+		return s.block(g, "出口路径尚未验证或不支持当前配置")
+	}
+	ip, e := r.Probe(ctx, c.ProbeURL)
+	if e != nil || !expected(c, ip) {
+		return s.block(g, "公网出口检查失败或与期望 IP 不符")
+	}
+	after, e := r.Fingerprint(ctx)
+	if e != nil || after != before {
+		return s.block(g, "验证期间出口路径发生变化")
+	}
+	proof, e = s.inspect(ctx, policy(c))
+	if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
+		return s.block(g, "验证期间系统过滤失效")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g != s.generation {
+		return errors.New("验证已取消，需要重新检查")
+	}
+	if ctx.Err() != nil || arm && (!s.running || s.listener == nil || s.boundPort != c.ProxyPort) {
+		s.closeLocked()
+		s.status.State = "blocked"
+		s.status.Reason = "验证已取消或本地监听已停止，需要重新检查"
+		s.eventLocked(s.status.Reason)
+		return errors.New(s.status.Reason)
+	}
+	s.activeRoute = r
+	s.fingerprint = after
+	keep = true
+	s.status.State = "ready"
+	s.status.Reason = "入口已验证，可启用保护；真实客户端与断线验收仍需单独完成"
+	if arm {
+		s.status.State = "armed"
+		s.status.Reason = "本地入口已启用；出口变化检测存在时间窗口"
+	}
+	s.status.ObservedIP = ip
+	s.status.FilterActive = true
+	s.status.PolicyHash = proof.PolicyHash
+	s.eventLocked(s.status.Reason)
+	return nil
+}
+func (s *Service) track(c net.Conn, g uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status.State != "armed" || s.generation != g {
+		_ = c.Close()
+		return false
+	}
+	s.connections[c] = struct{}{}
+	return true
+}
+func (s *Service) untrack(c net.Conn) {
+	s.mu.Lock()
+	delete(s.connections, c)
+	s.mu.Unlock()
+	_ = c.Close()
+}
+func (s *Service) admission() (route, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeRoute, s.generation, s.status.State == "armed" && s.activeRoute != nil
+}
+func (s *Service) health(ctx context.Context) {
+	s.mu.Lock()
+	if s.status.State != "armed" || s.activeRoute == nil {
+		s.mu.Unlock()
+		return
+	}
+	g, c, r, fp := s.generation, copyConfig(s.config), s.activeRoute, s.fingerprint
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	if s.generation != g || s.status.State != "armed" {
+		s.mu.Unlock()
+		return
+	}
+	s.cancelHealth = cancel
+	s.mu.Unlock()
+	p, e := s.inspect(ctx, policy(c))
+	if e != nil || !p.Active || p.PolicyHash != enforce.Hash(policy(c)) {
+		_ = s.block(g, "系统过滤状态变化，入口已关闭")
+		return
+	}
+	next, e := r.Fingerprint(ctx)
+	if e != nil || fp != next {
+		_ = s.block(g, "出口路径变化，入口已关闭")
+		return
+	}
+	ip, e := r.Probe(ctx, c.ProbeURL)
+	if e != nil || !expected(c, ip) {
+		_ = s.block(g, "公网出口变化或检查失败，入口已关闭")
+		return
+	}
+	s.mu.Lock()
+	if g == s.generation {
+		s.status.ObservedIP = ip
+		s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.mu.Unlock()
+}
+
+// ProbeCandidate discovers only this process's route. It never authorizes application traffic.
+func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
+	if !s.checkMu.TryLock() {
+		return "", errors.New("已有验证任务正在运行，请等待或暂停")
+	}
+	defer s.checkMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	s.closeLocked()
+	g, c, secret := s.generation, copyConfig(s.config), s.secret
+	s.cancelCheck = cancel
+	s.status.State = "checking"
+	s.status.FilterActive = false
+	s.status.ObservedIP = ""
+	s.status.Reason = "正在探测守护进程的候选出口"
+	s.mu.Unlock()
+	if e := validateConfig(c, false); e != nil {
+		return "", s.block(g, e.Error())
+	}
+	r, e := s.makeRoute(c, secret)
+	if e != nil {
+		return "", s.block(g, e.Error())
+	}
+	defer r.Close()
+	before, e := r.Fingerprint(ctx)
+	if e != nil || before == "" {
+		return "", s.block(g, "候选出口路径不可用")
+	}
+	ip, e := r.Probe(ctx, c.ProbeURL)
+	if e != nil {
+		return "", s.block(g, "候选出口探测失败")
+	}
+	after, e := r.Fingerprint(ctx)
+	if e != nil || after != before {
+		return "", s.block(g, "候选出口路径已变化")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g != s.generation {
+		return "", errors.New("候选探测已取消")
+	}
+	if ctx.Err() != nil {
+		s.status.State = "blocked"
+		s.status.Reason = "候选探测已取消"
+		s.eventLocked(s.status.Reason)
+		return "", errors.New(s.status.Reason)
+	}
+	s.status.State = "blocked"
+	s.status.ObservedIP = ip
+	s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	s.status.Reason = "仅为守护进程的候选出口，未证明 Claude 路径；请另行确认固定性后填写期望 IP"
+	s.eventLocked(s.status.Reason)
+	return ip, nil
+}
+
+// SetControlHandler shares the fixed local port with authenticated origin-form controls.
+// It must be configured before Run; it cannot authorize proxy forwarding.
+func (s *Service) SetControlHandler(h http.Handler) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started {
+		return errors.New("控制界面必须在守护服务启动前配置")
+	}
+	if h == nil {
+		return errors.New("控制处理器不能为空")
+	}
+	s.controlHandler = h
+	return nil
+}
+func (s *Service) WaitReady(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.readySignal:
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.listener == nil || s.boundPort != s.config.ProxyPort {
+		return errors.New("守护服务未能独占配置端口")
+	}
+	return nil
+}

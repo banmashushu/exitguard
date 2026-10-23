@@ -1,0 +1,147 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"exitguard/internal/enforce"
+	"exitguard/internal/guard"
+	"exitguard/internal/ui"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "ExitGuard:", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	command := "serve"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command = args[0]
+		args = args[1:]
+	}
+	if command == "help" || (len(args) > 0 && (args[0] == "--help" || args[0] == "-h")) {
+		_, _ = io.WriteString(stdout, "ExitGuard — 本机固定出口控制\n\n  exitguard serve [--no-open] [--config PATH]\n  exitguard inspect [--config PATH]\n  exitguard filter-install [--config PATH]  # 仅在明确部署时执行，需要系统权限\n  exitguard filter-remove [--config PATH]   # 移除本产品规则\n\nserve/server 在守护代理的回环端口提供控制面板。stdout 仅输出一次含会话凭证的 ready JSON，请勿公开该输出。\n")
+		return nil
+	}
+	if command != "serve" && command != "server" && command != "inspect" && command != "filter-install" && command != "filter-remove" {
+		return errors.New("未知命令；使用 help 查看支持的操作")
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return errors.New("无法定位本机配置目录")
+	}
+	flags := flag.NewFlagSet("exitguard "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", filepath.Join(configDir, "ExitGuard", "config.json"), "本机配置文件")
+	noOpen := flags.Bool("no-open", false, "不自动打开控制面板")
+	_ = flags.Bool("ready-json", true, "stdout 仅输出一次机器可读就绪消息")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("命令参数无效")
+	}
+	if flags.NArg() != 0 {
+		return errors.New("不接受额外参数")
+	}
+	service, err := guard.New(*configPath)
+	if err != nil {
+		return err
+	}
+	if command == "serve" || command == "server" {
+		return serve(ctx, service, *noOpen, stdout, stderr)
+	}
+	c := service.Config()
+	policy := enforce.Policy{Port: c.ProxyPort, Programs: c.Programs, BundleIDs: c.BundleIDs}
+	operationTimeout := 45 * time.Second
+	if command == "filter-install" {
+		operationTimeout = 150 * time.Second
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	switch command {
+	case "inspect":
+		proof, inspectErr := enforce.Inspect(operationCtx, policy)
+		if err := json.NewEncoder(stdout).Encode(proof); err != nil {
+			return err
+		}
+		if inspectErr != nil {
+			return errors.New("系统过滤尚未就绪；详细原因见检查结果")
+		}
+		return nil
+	case "filter-install":
+		if err := enforce.Install(operationCtx, policy); err != nil {
+			return err
+		}
+		_, _ = io.WriteString(stdout, "已请求安装当前策略。请执行 inspect 核对系统实际状态，再完成真实设备断线验证。\n")
+	case "filter-remove":
+		if err := enforce.Remove(operationCtx, policy); err != nil {
+			return err
+		}
+		_, _ = io.WriteString(stdout, "已请求移除 ExitGuard 过滤策略。目标程序可能恢复普通网络访问。\n")
+	}
+	return nil
+}
+
+func serve(ctx context.Context, service *guard.Service, noOpen bool, stdout, stderr io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	control, launchURL, err := ui.NewControl(service, service.Status().ProxyAddress)
+	if err != nil {
+		return errors.New("无法启动本机控制面板")
+	}
+	defer service.Disarm()
+	if err := service.SetControlHandler(control); err != nil {
+		return err
+	}
+	results := make(chan error, 1)
+	go func() { results <- service.Run(ctx) }()
+	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer readyCancel()
+	if err := service.WaitReady(readyCtx); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(stdout).Encode(ui.Ready{Ready: true, URL: launchURL}); err != nil {
+		return err
+	}
+	if !noOpen && runtime.GOOS == "windows" {
+		if err := openPanel(launchURL); err != nil {
+			_, _ = io.WriteString(stderr, "控制面板未自动打开；请使用原生启动器或保密读取 ready 通道。\n")
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-results:
+		cancel()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func openPanel(url string) error {
+	// A single subprocess argument is passed directly; no shell interprets the
+	// process token. Only a freshly generated loopback URL reaches this method.
+	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}

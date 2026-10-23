@@ -1,0 +1,5 @@
+/dist/
+/.work/
+/.superpowers/
+*.test
+.DS_Store
