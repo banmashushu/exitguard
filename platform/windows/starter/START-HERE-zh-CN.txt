@@ -1,0 +1,36 @@
+ExitGuard · Windows / Mihomo Party 上手包
+
+先做第一步即可：不需要先购买静态代理，也不需要登录 Claude。
+Mihomo Party 目前更名为 Clash Party；本包同时使用两个名称。
+本包是 Windows x64 开发版。强制完整保护目标尚未完成，不能视为已验证的保护工具。
+
+一、检查当前环境（建议先做）
+1. 将整个 ZIP 解压到自己的可写文件夹，例如桌面。不要直接在压缩包里运行。
+2. 正常打开 Mihomo Party / Clash Party 即可。无需为了诊断启动或登录 Claude。
+3. 普通双击 1-check-environment.cmd。不要选择“以管理员身份运行”。
+4. 等待几秒，窗口会给出 ExitGuard-environment-随机数.json 的位置。用记事本打开；需要协助时仅分享这份 JSON。
+
+检查仅收集：系统版本/架构、BFE 服务状态、当前是否提权、Mihomo Party/Clash Party、Claude、Chrome、Edge 的允许名单运行进程线索，以及 127.0.0.1 的七个固定端口（7890/7891/7892/7897/9090/17890/17891）能否完成 TCP 连接。不发送 HTTP 或其他协议内容，不访问公网。
+报告会隐藏用户资料目录前缀。它不读取 ExitGuard 配置、订阅、节点列表、密码、令牌、浏览记录，不列出其他应用、完整命令行、网卡地址或电脑名称。导出前仍建议自己查看报告中的应用路径。
+权限不足、查询失败或超时标为 unknown 或 null，无需因此提权。not_detected 仅表示允许名单运行进程中未发现，不代表未安装；未运行的应用不会被发现。检查不扫描任何安装目录，也不会检查环境变量指向的文件、共享盘或目录链接。tcp_reachable=true 只表示端口可达，不能据此识别服务。
+protection_assessed=false 表示本检查没有判断系统保护状态；包括既有旧规则是否存在。BFE 运行、端口可达或找到某个 DLL 都不等于受保护。
+这一步不安装/移除过滤，不更改系统代理、服务、路由、防火墙或订阅，不自动提权。它只新增这份诊断报告。
+
+二、查看现有面板（可选）
+双击 2-open-panel.cmd，会打开浏览器中的本机控制面板；保留命令窗口运行。此步骤会使用或首次创建 ExitGuard 的本机配置。不要公开面板地址或本次会话凭证。
+面板打开不表示保护已启用。不确定配置时先停在第一步。已有过滤规则的状态和移除方式需要另外核对，本包不会自行改变它们。
+
+三、以后准备固定入口（现在不必做）
+可选的 mihomo-party-exitguard.js 只是供查看的 JavaScript 覆写例子，本包不会自动导入它。
+默认 TARGET_PROXY=""，不做任何修改。只有确认服务商提供固定公网 IPv4、确认当前内核支持 listeners，并明确选择现有的单个叶子节点后，才手动填写精确节点名并按 Clash Party 的覆写流程导入；先保留自己的配置备份。
+例子只添加 exitguard-in HTTP 入口：127.0.0.1:17891，users:[]，proxy 直接指向填写的叶子。不修改其他规则、节点、分组或系统代理。17890 留给 ExitGuard，不能相互占用。
+它拒绝策略组、DIRECT/REJECT/PASS 等内置项、未知/重复节点、dialer-proxy 链和监听名称/端口冲突；现有监听使用端口范围、逗号列表或无法可靠判断的格式时，也会明确拒绝，不改动配置。完全一致的已有入口可重复执行。未知或特殊协议需单独核对。
+这份例子不能证明服务商出口永不变化；缺少固定出口确认时不要开启保护。
+官方说明：
+https://clashparty.org/docs/guide/override/javascript
+https://wiki.metacubex.one/en/config/inbound/listeners/http/
+https://wiki.metacubex.one/en/config/inbound/listeners/
+
+尚待完成
+此 EXE 在 Mac 上交叉编译，尚未完成 Windows 实机验收。需另外验证当前 Windows 版本、Mihomo/Clash Party 内核、实际 Claude/浏览器行为、程序与辅助进程路径、WFP 权限和真实断线场景。系统代发 DNS、更新后新增辅助程序的全面覆盖仍有实现缺口，不能用本包保证 Claude 完整安全。
+系统过滤的安装/移除不在这个上手流程内；本包的两个入口均不调用安装或移除命令。Mac 网络设置和 NetDetour 安装不属于本包内容。

@@ -4,6 +4,22 @@ ExitGuard 在本机核对指定出口，并通过系统过滤将明确选择的�
 
 **当前交付是未激活开发版，强制完整保护目标尚未完成，不能作为已验证的保护工具。** 当前 Mac 没有合格签名的 Network Extension，入口保持未就绪；Windows 尚未实机验收。系统服务代发 DNS 与运行中更新新增辅助程序的全面覆盖机制尚未实现，不只是缺少测试。现有系统规则只约束明确列出的目标，不能证明整个 Claude 安全。固定节点、平台权限、真实客户端与逐项验证仍然必需；固定出口不能保证账号不被封禁。
 
+## Windows / Mihomo Party：先检查环境
+
+普通用户可先使用 `dist/ExitGuard-Windows-MihomoParty-starter.zip`，解压后双击 `1-check-environment.cmd`。**第一步不需要购买静态代理、登录 Claude 或管理员权限。** 几秒后会在同一文件夹生成 JSON 报告；先查看，再按需分享这一个文件。Mihomo Party 目前更名为 Clash Party。
+
+检查只收集系统版本、BFE/提权状态、四类相关应用的运行进程线索（用户资料路径脱敏；不扫描安装目录，未发现不代表未安装），并对七个固定的 `127.0.0.1` 端口做无内容 TCP 连接。它不读守护配置、订阅或凭证，不访问公网，不安装/移除过滤，不改系统代理或服务。无法判断的字段为 `unknown`/`null`；`protection_assessed:false` 表示没有判断现有保护状态。端口可达不能识别服务，也不表示受保护。
+
+`2-open-panel.cmd` 可选地打开现有控制面板。包内 JavaScript 覆写例子默认不做修改，需后续手工选定固定叶子节点才可使用，不会自动导入。完整步骤见 [Windows 上手说明](platform/windows/starter/START-HERE-zh-CN.txt)。本包仍是交叉编译开发版，需要 Windows 实机验收，强制完整保护仍有上述缺口。
+
+开发者可构建同一上手包，原有开发产物会保留：
+
+```sh
+sh scripts/package-windows-starter.sh
+```
+
+命令行只读检查可用 `exitguard doctor`（JSON 输出到终端）或 `exitguard doctor --output 新报告.json`（只创建新文件，不覆盖既有文件）。
+
 ## 本地启动
 
 需要 Go 1.23 或更新版本。Mac 应用需要 macOS 13+、Apple 命令行开发工具和 Swift 编译器，无第三方运行时。

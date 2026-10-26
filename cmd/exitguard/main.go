@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"exitguard/internal/diagnostics"
 	"exitguard/internal/enforce"
 	"exitguard/internal/guard"
 	"exitguard/internal/ui"
@@ -37,8 +38,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		args = args[1:]
 	}
 	if command == "help" || (len(args) > 0 && (args[0] == "--help" || args[0] == "-h")) {
-		_, _ = io.WriteString(stdout, "ExitGuard — 本机固定出口控制\n\n  exitguard serve [--no-open] [--config PATH]\n  exitguard inspect [--config PATH]\n  exitguard filter-install [--config PATH]  # 仅在明确部署时执行，需要系统权限\n  exitguard filter-remove [--config PATH]   # 移除本产品规则\n\nserve/server 在守护代理的回环端口提供控制面板。stdout 仅输出一次含会话凭证的 ready JSON，请勿公开该输出。\n")
+		_, _ = io.WriteString(stdout, "ExitGuard — 本机固定出口控制\n\n  exitguard serve [--no-open] [--config PATH]\n  exitguard inspect [--config PATH]\n  exitguard doctor [--output PATH]  # 只读环境报告，不检查保护状态\n  exitguard filter-install [--config PATH]  # 仅在明确部署时执行，需要系统权限\n  exitguard filter-remove [--config PATH]   # 移除本产品规则\n\nserve/server 在守护代理的回环端口提供控制面板。stdout 仅输出一次含会话凭证的 ready JSON，请勿公开该输出。\n")
 		return nil
+	}
+	// Keep read-only diagnosis before config-directory lookup and guard.New.
+	if command == "doctor" {
+		return doctor(ctx, args, stdout, stderr)
 	}
 	if command != "serve" && command != "server" && command != "inspect" && command != "filter-install" && command != "filter-remove" {
 		return errors.New("未知命令；使用 help 查看支持的操作")
@@ -143,5 +148,48 @@ func openPanel(url string) error {
 		return err
 	}
 	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// doctor never constructs a guard service or imports user proxy configuration.
+func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("exitguard doctor", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	output := flags.String("output", "", "只读诊断报告路径")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return errors.New("doctor 参数无效；仅支持 --output PATH")
+	}
+	specified := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "output" {
+			specified = true
+		}
+	})
+	if specified && strings.TrimSpace(*output) == "" {
+		return errors.New("报告路径不能为空")
+	}
+	report := diagnostics.Collect(ctx)
+	var destination io.Writer = stdout
+	var file *os.File
+	if specified {
+		var err error
+		// Never replace an existing file or follow an existing report symlink.
+		file, err = os.OpenFile(*output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return errors.New("无法创建诊断报告；请使用可写目录中的新文件名")
+		}
+		defer file.Close()
+		destination = file
+	}
+	encoder := json.NewEncoder(destination)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		return errors.New("无法写入诊断报告")
+	}
+	if file != nil {
+		if err := file.Close(); err != nil {
+			return errors.New("无法保存诊断报告")
+		}
+	}
 	return nil
 }

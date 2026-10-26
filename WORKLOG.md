@@ -1,5 +1,11 @@
 # ExitGuard execution ledger
 
+Latest steering (2026-10-24): user switched to Windows first; client is Mihomo Party (version not yet known). Mac preparation stays read-only; no consent to install NetDetour. Prepare a read-only Windows diagnostic/starter package under `docs/superpowers/plans/2026-10-24-windows-starter.md`. Static proxy is still pending; do not claim enforcement ready.
+
+Windows starter delivery: isolated `doctor` command and numbered starter launchers implemented. Diagnostics use only allowlisted running-process metadata and seven literal loopback TCP probes; no subscription/config reads, public probes or system changes. Removed environment-based candidate file scans after review identified UNC/mapped-network side effects. Metadata is labeled limited/unknown, protection is not assessed. Optional Mihomo override is unapplied and defaults to no-op. Root independently reran full Go tests/race/vet, both Node suites, Windows cross-build/package and ZIP integrity successfully. Windows native runtime remains to be performed by the user; first action is ordinary `1-check-environment.cmd` with Mihomo Party open, without launching Claude or installing filters.
+
+2026-10-24 steering: user prioritizes Mac and has no Apple developer signing account. Read-only inventory still finds CorpLink but no Claude Desktop. Evaluating an already-signed vendor backend before extending undeployable native code; no third-party filter installation authorized/executed yet. Details: `docs/macos-priority.md`.
+
 Plan: `docs/superpowers/plans/2026-10-23-exit-guard.md`
 
 User approval: 2026-10-23, strong disconnection blocking on Windows+macOS, separate fixed exits.

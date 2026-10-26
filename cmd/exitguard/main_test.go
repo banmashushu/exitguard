@@ -61,3 +61,73 @@ func TestUnknownCommandCannotReachPrivilegedOperation(t *testing.T) {
 		t.Fatal("unknown command emitted ready credential")
 	}
 }
+
+func TestDoctorDoesNotLoadGuardConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardDir := filepath.Join(configDir, "ExitGuard")
+	if err := os.MkdirAll(guardDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(guardDir, "config.json")
+	original := []byte("MALFORMED-CONFIG-SECRET")
+	if err := os.WriteFile(configPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	if err := run(ctx, []string{"doctor"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		SchemaVersion      int   `json:"schema_version"`
+		ProtectionAssessed *bool `json:"protection_assessed"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 1 || (report.ProtectionAssessed == nil || *report.ProtectionAssessed) || stderr.Len() != 0 {
+		t.Fatalf("bad report: %s %s", stdout.String(), stderr.String())
+	}
+	current, _ := os.ReadFile(configPath)
+	if !bytes.Equal(current, original) || strings.Contains(stdout.String(), "SECRET") {
+		t.Fatal("doctor touched/leaked guard config")
+	}
+	entries, _ := os.ReadDir(guardDir)
+	if len(entries) != 1 {
+		t.Fatal("doctor created guard state")
+	}
+}
+
+func TestDoctorWritesOnlyExplicitReportAndRejectsGuardFlags(t *testing.T) {
+	dir := t.TempDir()
+	output := filepath.Join(dir, "report.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	if err := run(ctx, []string{"doctor", "--output", output}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || !json.Valid(data) || stdout.Len() != 0 {
+		t.Fatalf("bad output: %v %s %s", err, data, stdout.String())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatal("extra output files")
+	}
+	for _, args := range [][]string{{"doctor", "--config", "secret"}, {"doctor", "filter-install"}, {"doctor", "--output", ""}} {
+		stdout.Reset()
+		stderr.Reset()
+		if err := run(ctx, args, &stdout, &stderr); err == nil || stdout.Len() != 0 {
+			t.Fatalf("doctor accepted unsupported args: %v", args)
+		}
+	}
+}
