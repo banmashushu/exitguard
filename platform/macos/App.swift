@@ -42,7 +42,7 @@ final class ExitGuardApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKN
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
-        showMessage(title: "正在启动本机守护", message: "保护入口默认关闭。系统权限和固定出口验证通过后才能启用。")
+        showMessage(title: "正在启动本机守护", message: "代理转发默认关闭。填写上游与期望 IP，检查通过后即可启用；严格阻断另需系统部署。")
         startCore()
     }
 
@@ -97,7 +97,7 @@ final class ExitGuardApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKN
             stderr.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 guard let self = self, !self.quitting else { return }
-                self.showFailure("守护核心已停止（退出码 \(exited.terminationStatus)）。受保护代理已关闭，请退出并重新打开应用；系统过滤需要单独检查。")
+                self.showFailure("守护核心已停止（退出码 \(exited.terminationStatus)）。本机代理已关闭，请退出并重新打开应用；已有系统规则需要单独检查。")
             }
         }
         do { try process.run(); core = process }
@@ -131,7 +131,7 @@ final class ExitGuardApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKN
         webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
     }
 
-    private func showFailure(_ message: String) { showMessage(title: "保护尚未就绪", message: message) }
+    private func showFailure(_ message: String) { showMessage(title: "本机代理尚未就绪", message: message) }
     private func showMessage(title: String, message: String) {
         let escaped = message.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         webView.loadHTMLString("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><body style='font:15px -apple-system;background:#f6f8f5;color:#234d3e;display:grid;place-content:center;height:85vh;margin:0'><div style='max-width:540px;padding:40px'><p style='font-size:13px;letter-spacing:2px'>EXITGUARD</p><h1 style='font-size:28px'>\(title)</h1><p style='color:#748272;line-height:1.9'>\(escaped)</p></div></body></html>", baseURL: nil)

@@ -3,6 +3,7 @@ package model
 
 type Config struct {
 	Mode               string   `json:"mode"`
+	EnforcementMode    string   `json:"enforcementMode"`
 	ExpectedIPs        []string `json:"expectedIPs"`
 	ProxyURL           string   `json:"proxyURL"`
 	ClashControllerURL string   `json:"clashControllerURL"`
@@ -18,14 +19,17 @@ type Config struct {
 }
 
 type Status struct {
-	State        string `json:"state"`
-	Reason       string `json:"reason"`
-	ObservedIP   string `json:"observedIP"`
-	FilterActive bool   `json:"filterActive"`
-	PolicyHash   string `json:"policyHash"`
-	ProxyAddress string `json:"proxyAddress"`
-	Platform     string `json:"platform"`
-	CheckedAt    string `json:"checkedAt"`
+	EnforcementMode        string `json:"enforcementMode"`
+	UpstreamCredentialsSet bool   `json:"upstreamCredentialsSet"`
+	SessionRevision        uint64 `json:"sessionRevision"`
+	State                  string `json:"state"`
+	Reason                 string `json:"reason"`
+	ObservedIP             string `json:"observedIP"`
+	FilterActive           bool   `json:"filterActive"`
+	PolicyHash             string `json:"policyHash"`
+	ProxyAddress           string `json:"proxyAddress"`
+	Platform               string `json:"platform"`
+	CheckedAt              string `json:"checkedAt"`
 }
 
 type Event struct {

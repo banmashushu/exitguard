@@ -28,6 +28,8 @@ type testService struct {
 	config                          model.Config
 	status                          model.Status
 	secret                          string
+	proxyUsername, proxyPassword    string
+	proxyCredentialError            error
 	saved, checked, armed, disarmed int
 }
 
@@ -518,5 +520,154 @@ func TestFinalProcessStartRechecksCurrentProtection(t *testing.T) {
 	}
 	if command.Process != nil {
 		t.Fatal("process created after protection was revoked")
+	}
+}
+
+func (s *testService) SetProxyCredentials(username, password string) error {
+	s.proxyUsername, s.proxyPassword = username, password
+	return s.proxyCredentialError
+}
+
+func TestProxyCredentialsUseAuthenticatedBoundedAPIWithoutEcho(t *testing.T) {
+	h, s := testHandler()
+	body := `{"username":"session-user","password":"session-password"}`
+	w := request(h, "POST", "/api/proxy-credentials", body, "", h.host, "")
+	if w.Code != 401 || s.proxyUsername != "" {
+		t.Fatal("unauthenticated credentials accepted")
+	}
+	w = request(h, "POST", "/api/proxy-credentials", body, "test-token", h.host, "")
+	if w.Code != 200 || s.proxyUsername != "session-user" || s.proxyPassword != "session-password" {
+		t.Fatalf("credential submission: %d %s", w.Code, w.Body)
+	}
+	for _, path := range []string{"/api/snapshot", "/api/proxy-credentials"} {
+		method, payload := "GET", ""
+		if path != "/api/snapshot" {
+			method, payload = "POST", body
+		}
+		w = request(h, method, path, payload, "test-token", h.host, "")
+		if strings.Contains(w.Body.String(), "session-user") || strings.Contains(w.Body.String(), "session-password") {
+			t.Fatal("credential echoed")
+		}
+	}
+	s.proxyCredentialError = errors.New("invalid session-password")
+	w = request(h, "POST", "/api/proxy-credentials", body, "test-token", h.host, "")
+	if w.Code != 400 || strings.Contains(w.Body.String(), "session-password") {
+		t.Fatal("credential validation failed to redact error")
+	}
+	for _, body := range []string{`{"username":"u","password":"p","url":"http://evil"}`, `{"username":"` + strings.Repeat("u", 4097) + `","password":"p"}`} {
+		w = request(h, "POST", "/api/proxy-credentials", body, "test-token", h.host, "")
+		if w.Code != 400 {
+			t.Fatalf("invalid credentials: %d", w.Code)
+		}
+	}
+}
+
+func proxyOnlyFixture(t *testing.T) (model.Config, model.Status) {
+	t.Helper()
+	var c model.Config
+	var s model.Status
+	if err := json.Unmarshal([]byte(`{"enforcementMode":"proxy-only","proxyPort":17890}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"enforcementMode":"proxy-only","state":"proxy_active","filterActive":false,"proxyAddress":"127.0.0.1:17890","sessionRevision":8}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	return c, s
+}
+
+func TestProxyOnlyBrowserAndClaudeLaunchWithoutOSCoverage(t *testing.T) {
+	c, s := proxyOnlyFixture(t)
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	for _, target := range []struct{ kind, name string }{{"browser", "Google Chrome"}, {"claude", "Claude"}} {
+		path := filepath.Join(dir, target.name)
+		if err := os.WriteFile(path, []byte("fixture executable"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		r := launchRequest{Kind: target.kind, Path: path}
+		var cmd *exec.Cmd
+		var err error
+		if target.kind == "browser" {
+			cmd, err = browserCommand(c, s, r, "darwin", filepath.Join(dir, "profile"))
+		} else {
+			cmd, err = claudeCommand(c, s, r, "darwin")
+		}
+		if err != nil {
+			t.Fatalf("%s proxy-only launch requires strict OS proof: %v", target.kind, err)
+		}
+		args := strings.Join(cmd.Args, " ")
+		if !strings.Contains(args, "--proxy-server=http://127.0.0.1:17890") || strings.Contains(strings.ToUpper(args), "DIRECT") {
+			t.Fatalf("unsafe arguments: %s", args)
+		}
+	}
+}
+
+func TestLaunchReadinessRejectsModeStateMismatch(t *testing.T) {
+	h, service := testHandler()
+	service.config, service.status = proxyOnlyFixture(t)
+	w := request(h, "GET", "/api/snapshot", "", "test-token", h.host, "")
+	if !strings.Contains(w.Body.String(), `"launchReady":true`) {
+		t.Fatalf("proxy-active not launchable: %s", w.Body)
+	}
+	for _, statusJSON := range []string{
+		`{"enforcementMode":"required","state":"proxy_active","filterActive":false}`,
+		`{"enforcementMode":"proxy-only","state":"armed","filterActive":true}`,
+		`{"enforcementMode":"proxy-only","state":"proxy_active","filterActive":true}`,
+		`{"enforcementMode":"proxy-only","state":"proxy_ready","filterActive":false}`,
+	} {
+		json.Unmarshal([]byte(statusJSON), &service.status)
+		w = request(h, "GET", "/api/snapshot", "", "test-token", h.host, "")
+		if !strings.Contains(w.Body.String(), `"launchReady":false`) {
+			t.Fatalf("mismatched status launchable: %s", w.Body)
+		}
+	}
+}
+
+func TestFinalProcessStartRejectsReactivatedSessionRevision(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		c, expected := proxyOnlyFixture(t)
+		if strict {
+			c.EnforcementMode = "required"
+			expected.EnforcementMode, expected.State, expected.FilterActive = "required", "armed", true
+			expected.PolicyHash = "same-policy"
+		}
+		current := expected
+		current.SessionRevision++
+		s := &testService{config: c, status: current}
+		command := exec.Command(os.Args[0], "-test.run=^$")
+		err := startIfArmed(s, expected, command)
+		if command.Process != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+		if err == nil || command.Process != nil {
+			t.Fatalf("stale activation revision started a process (strict=%v)", strict)
+		}
+	}
+}
+
+func TestLaunchAPIRejectsCachedProxySessionRevision(t *testing.T) {
+	h, s := testHandler()
+	s.config, s.status = proxyOnlyFixture(t)
+	w := request(h, "POST", "/api/launch", `{"kind":"browser","path":"/not-started","sessionRevision":7}`, "test-token", h.host, "")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "会话已变化") {
+		t.Fatalf("stale revision was not rejected before launch: %d %s", w.Code, w.Body)
+	}
+	w = request(h, "POST", "/api/launch", `{"kind":"browser","path":"/not-started"}`, "test-token", h.host, "")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "会话已变化") {
+		t.Fatalf("proxy launch omitted revision: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestProxyLaunchCommandRejectsRequestRevisionChangedDuringPreparation(t *testing.T) {
+	c, s := proxyOnlyFixture(t)
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(dir, "chrome.exe")
+	if err := os.WriteFile(path, []byte("fixture"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stale := uint64(7)
+	r := launchRequest{Kind: "browser", Path: path, SessionRevision: &stale}
+	if _, err := browserCommand(c, s, r, "windows", filepath.Join(dir, "profile")); err == nil {
+		t.Fatal("old UI session accepted during command preparation")
 	}
 }

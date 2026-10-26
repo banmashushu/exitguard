@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -168,6 +170,9 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 	return ips, nil
 }
 func resolveHTTPS(ctx context.Context, host, resolver, bootstrap string, dial func(context.Context, string, string) (net.Conn, error)) ([]string, error) {
+	return resolveHTTPSWithRoots(ctx, host, resolver, bootstrap, dial, nil)
+}
+func resolveHTTPSWithRoots(ctx context.Context, host, resolver, bootstrap string, dial func(context.Context, string, string) (net.Conn, error), roots *x509.CertPool) ([]string, error) {
 	u, e := url.Parse(resolver)
 	if e != nil || secureURL(resolver) != nil {
 		return nil, errors.New("安全 DNS 地址无效")
@@ -187,7 +192,7 @@ func resolveHTTPS(ctx context.Context, host, resolver, bootstrap string, dial fu
 			return nil, errors.New("安全 DNS 不允许其他连接")
 		}
 		return dial(ctx, "tcp", endpoint)
-	}, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 4 * time.Second, DisableKeepAlives: true, ForceAttemptHTTP2: false, MaxResponseHeaderBytes: 16 << 10}}
+	}, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 4 * time.Second, DisableKeepAlives: true, ForceAttemptHTTP2: false, MaxResponseHeaderBytes: 16 << 10}}
 	return queryIPv4(ctx, host, resolver, client)
 }
 func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) ([]string, error) {

@@ -11,12 +11,17 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"exitguard/internal/model"
 )
 
 func defaults(c model.Config) model.Config {
+	// An explicit or saved legacy configuration must retain strict enforcement.
+	if c.EnforcementMode == "" {
+		c.EnforcementMode = "required"
+	}
 	if c.Mode == "" {
 		if runtime.GOOS == "windows" {
 			c.Mode = "clash"
@@ -65,8 +70,29 @@ func secureURL(raw string) error {
 	}
 	return nil
 }
+func remoteProxyURL(raw string) (*url.URL, error) {
+	u, e := url.Parse(raw)
+	if e != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") || u.User != nil || u.Hostname() == "" || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return nil, errors.New("远程代理必须是无凭证、路径或参数的 HTTP、HTTPS 或 SOCKS5 地址")
+	}
+	port, e := strconv.Atoi(u.Port())
+	if e != nil || port < 1 || port > 65535 {
+		return nil, errors.New("远程代理必须填写明确的有效端口")
+	}
+	if ip, e := netip.ParseAddr(u.Hostname()); e == nil {
+		if !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+			return nil, errors.New("远程代理必须使用有效 IPv4 或主机名")
+		}
+	} else if _, e := dnsQuestion(u.Hostname(), 1); e != nil {
+		return nil, errors.New("远程代理主机名无效")
+	}
+	return u, nil
+}
 func validateConfig(c model.Config, complete bool) error {
-	if c.Mode != "clash" && c.Mode != "feilian" && c.Mode != "proxy" {
+	if c.EnforcementMode != "required" && c.EnforcementMode != "proxy-only" {
+		return errors.New("请选择代理转发或严格阻断模式")
+	}
+	if c.Mode != "clash" && c.Mode != "feilian" && c.Mode != "proxy" && c.Mode != "remote" {
 		return errors.New("出口来源无效")
 	}
 	if c.ProxyPort == 0 {
@@ -91,7 +117,18 @@ func validateConfig(c model.Config, complete bool) error {
 			return errors.New("应用标识无效")
 		}
 	}
-	for _, raw := range []string{c.ProxyURL, c.ClashControllerURL} {
+	if c.ProxyURL != "" {
+		var e error
+		if c.Mode == "remote" {
+			_, e = remoteProxyURL(c.ProxyURL)
+		} else {
+			_, e = localHTTP(c.ProxyURL)
+		}
+		if e != nil {
+			return e
+		}
+	}
+	for _, raw := range []string{c.ClashControllerURL} {
 		if raw != "" {
 			if _, e := localHTTP(raw); e != nil {
 				return e
@@ -127,7 +164,7 @@ func validateConfig(c model.Config, complete bool) error {
 		if len(c.ExpectedIPs) == 0 {
 			return errors.New("请先确认并填写固定公网 IP")
 		}
-		if len(c.Programs)+len(c.BundleIDs) == 0 {
+		if c.EnforcementMode == "required" && len(c.Programs)+len(c.BundleIDs) == 0 {
 			return errors.New("请先选择受保护程序")
 		}
 		if c.Mode == "clash" && (c.ProxyURL == "" || c.ClashControllerURL == "" || c.ClashNode == "" || c.ClashSelector == "") {
@@ -135,6 +172,9 @@ func validateConfig(c model.Config, complete bool) error {
 		}
 		if c.Mode == "proxy" && c.ProxyURL == "" {
 			return errors.New("请填写已配置的固定本地代理专用入口")
+		}
+		if c.Mode == "remote" && c.ProxyURL == "" {
+			return errors.New("请填写远程代理服务器和端口")
 		}
 		if c.Mode == "feilian" && (c.TunnelInterface == "" || c.DNSResolverURL == "" || c.DNSBootstrapIP == "") {
 			return errors.New("请确认飞连隧道接口及安全 DNS 和引导 IP")
@@ -145,7 +185,7 @@ func validateConfig(c model.Config, complete bool) error {
 func loadConfig(path string) (model.Config, error) {
 	f, e := os.Open(path)
 	if os.IsNotExist(e) {
-		return defaults(model.Config{}), nil
+		return defaults(model.Config{Mode: "remote", EnforcementMode: "proxy-only"}), nil
 	}
 	if e != nil {
 		return model.Config{}, errors.New("无法读取配置")

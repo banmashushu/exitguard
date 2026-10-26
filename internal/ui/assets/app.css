@@ -3,3 +3,5 @@
 .advanced summary{cursor:pointer;font-weight:600;font-size:13px;color:#526c59;list-style-position:inside}.advanced summary span{font-size:10px;font-weight:400;color:#99a38f;margin-left:12px}.advanced[open] summary{margin-bottom:18px}.client-launch{margin-top:12px}
 
 .development-note{font-size:10px;color:#94866e;background:#f4f0e6;border:1px solid #e7e0cf;padding:9px 13px;border-radius:7px;margin:-15px 0 22px}
+
+.status-card.proxy-active{background:#304e65}.proxy-active .status-dot{background:#adc6de}.secret-box+.muted{margin-top:12px}#save-proxy-credentials{margin-bottom:8px}#save-proxy-credentials+.subtle-note{display:block}

@@ -1,4 +1,4 @@
-// Package guard owns a fail-closed local proxy. OS enforcement is a separate prerequisite.
+// Package guard owns a bounded local proxy with explicit optional OS enforcement.
 package guard
 
 import (
@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,27 +23,30 @@ type route interface {
 	Close() error
 }
 type Service struct {
-	mu             sync.Mutex
-	checkMu        sync.Mutex
-	configPath     string
-	config         model.Config
-	status         model.Status
-	secret         string
-	events         []model.Event
-	generation     uint64
-	connections    map[net.Conn]struct{}
-	activeRoute    route
-	fingerprint    string
-	inspect        func(context.Context, enforce.Policy) (enforce.Proof, error)
-	makeRoute      func(model.Config, string) (route, error)
-	running        bool
-	listener       net.Listener
-	boundPort      uint16
-	controlHandler http.Handler
-	readySignal    chan struct{}
-	started        bool
-	cancelCheck    context.CancelFunc
-	cancelHealth   context.CancelFunc
+	mu              sync.Mutex
+	checkMu         sync.Mutex
+	configPath      string
+	config          model.Config
+	status          model.Status
+	secret          string
+	proxyUsername   string
+	proxyPassword   string
+	events          []model.Event
+	generation      uint64
+	connections     map[net.Conn]struct{}
+	activeRoute     route
+	fingerprint     string
+	inspect         func(context.Context, enforce.Policy) (enforce.Proof, error)
+	makeRoute       func(model.Config, string) (route, error)
+	makeRemoteRoute func(context.Context, model.Config, string, string) (route, error)
+	running         bool
+	listener        net.Listener
+	boundPort       uint16
+	controlHandler  http.Handler
+	readySignal     chan struct{}
+	started         bool
+	cancelCheck     context.CancelFunc
+	cancelHealth    context.CancelFunc
 }
 
 func New(configPath string) (*Service, error) {
@@ -50,8 +54,8 @@ func New(configPath string) (*Service, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute}
-	s.status = model.Status{State: "unconfigured", Reason: "尚未验证出口与系统过滤，受保护入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c)}
+	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute}
+	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c)}
 	return s, nil
 }
 func (s *Service) Config() model.Config {
@@ -81,6 +85,9 @@ func (s *Service) closeLocked() {
 		s.cancelHealth = nil
 	}
 	s.generation++
+	s.status.SessionRevision = s.generation
+	s.status.FilterActive = false
+	s.status.PolicyHash = ""
 	for c := range s.connections {
 		_ = c.Close()
 		delete(s.connections, c)
@@ -94,10 +101,16 @@ func (s *Service) closeLocked() {
 func (s *Service) SaveConfig(c model.Config) error {
 	c = defaults(copyConfig(c))
 	if e := validateConfig(c, false); e != nil {
+		s.mu.Lock()
+		s.closeLocked()
+		s.status.State, s.status.Reason = "blocked", e.Error()
+		s.eventLocked("配置无效，入口已关闭")
+		s.mu.Unlock()
 		return e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	old := s.config
 	s.closeLocked()
 	if s.running && c.ProxyPort != s.config.ProxyPort {
 		s.status.State = "blocked"
@@ -117,8 +130,51 @@ func (s *Service) SaveConfig(c model.Config) error {
 		return e
 	}
 	s.config = c
+	if c.Mode != "remote" || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL {
+		s.proxyUsername, s.proxyPassword = "", ""
+		s.status.UpstreamCredentialsSet = false
+	}
+	s.status.EnforcementMode = c.EnforcementMode
 	s.status.ProxyAddress = proxyAddress(c)
 	s.eventLocked("配置已保存，入口已关闭")
+	return nil
+}
+
+// SetProxyCredentials retains credentials only for this process and this endpoint.
+// It never adds credentials to configuration, events, URLs or status snapshots.
+func (s *Service) SetProxyCredentials(username, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked()
+	e := validateProxyCredentials(username, password)
+	if s.config.Mode != "remote" && username != "" {
+		e = errors.New("仅远程代理模式接受代理凭证")
+	}
+	if e != nil {
+		s.proxyUsername, s.proxyPassword = "", ""
+		s.status.UpstreamCredentialsSet = false
+		s.status.State, s.status.Reason = "blocked", e.Error()
+		s.eventLocked("代理凭证无效，入口已关闭")
+		return e
+	}
+	s.proxyUsername, s.proxyPassword = username, password
+	s.status.UpstreamCredentialsSet = username != ""
+	s.status.State = "unconfigured"
+	s.status.Reason = "代理会话凭证已更新，需要重新验证"
+	s.eventLocked(s.status.Reason)
+	return nil
+}
+func validateProxyCredentials(username, password string) error {
+	if (username == "") != (password == "") || len(username) > 255 || len(password) > 255 || strings.Contains(username, ":") {
+		return errors.New("代理凭证格式无效，用户名和密码须同时填写或同时清除")
+	}
+	for _, value := range []string{username, password} {
+		for _, c := range value {
+			if c < 0x20 || c == 0x7f {
+				return errors.New("代理凭证不能包含控制字符")
+			}
+		}
+	}
 	return nil
 }
 func (s *Service) SetSecret(secret string) {
@@ -183,8 +239,9 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	s.cancelCheck = cancel
 	c := copyConfig(s.config)
 	secret := s.secret
+	username, password := s.proxyUsername, s.proxyPassword
 	s.status.State = "checking"
-	s.status.Reason = "正在核验系统过滤与专用出口"
+	s.status.Reason = "正在核验指定出口"
 	s.status.FilterActive = false
 	s.status.ObservedIP = ""
 	s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
@@ -200,11 +257,15 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	if e := validateConfig(c, true); e != nil {
 		return s.block(g, e.Error())
 	}
-	proof, e := s.inspect(ctx, policy(c))
-	if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
-		return s.block(g, "系统过滤未安装、未启用或与当前目标配置不匹配")
+	var proof enforce.Proof
+	var e error
+	if c.EnforcementMode == "required" {
+		proof, e = s.inspect(ctx, policy(c))
+		if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
+			return s.block(g, "系统过滤未安装、未启用或与当前目标配置不匹配")
+		}
 	}
-	r, e := s.makeRoute(c, secret)
+	r, e := s.routeFor(ctx, c, secret, username, password)
 	if e != nil {
 		return s.block(g, e.Error())
 	}
@@ -226,9 +287,11 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	if e != nil || after != before {
 		return s.block(g, "验证期间出口路径发生变化")
 	}
-	proof, e = s.inspect(ctx, policy(c))
-	if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
-		return s.block(g, "验证期间系统过滤失效")
+	if c.EnforcementMode == "required" {
+		proof, e = s.inspect(ctx, policy(c))
+		if e != nil || !proof.Active || proof.PolicyHash != enforce.Hash(policy(c)) {
+			return s.block(g, "验证期间系统过滤失效")
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -254,13 +317,23 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	s.status.ObservedIP = ip
 	s.status.FilterActive = true
 	s.status.PolicyHash = proof.PolicyHash
+	if c.EnforcementMode == "proxy-only" {
+		s.status.State = "proxy_ready"
+		s.status.Reason = "代理出口已验证，可启用转发；仅代理转发，系统防绕行未验证"
+		if arm {
+			s.status.State = "proxy_active"
+			s.status.Reason = "代理运行中；仅代理转发，系统防绕行未验证；仅转发使用本代理的 IPv4 TCP 流量"
+		}
+		s.status.FilterActive = false
+		s.status.PolicyHash = ""
+	}
 	s.eventLocked(s.status.Reason)
 	return nil
 }
 func (s *Service) track(c net.Conn, g uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status.State != "armed" || s.generation != g {
+	if !activeState(s.status.State) || s.generation != g {
 		_ = c.Close()
 		return false
 	}
@@ -276,11 +349,18 @@ func (s *Service) untrack(c net.Conn) {
 func (s *Service) admission() (route, uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.activeRoute, s.generation, s.status.State == "armed" && s.activeRoute != nil
+	return s.activeRoute, s.generation, activeState(s.status.State) && s.activeRoute != nil
+}
+func activeState(state string) bool { return state == "armed" || state == "proxy_active" }
+func (s *Service) routeFor(ctx context.Context, c model.Config, secret, username, password string) (route, error) {
+	if c.Mode == "remote" {
+		return s.makeRemoteRoute(ctx, c, username, password)
+	}
+	return s.makeRoute(c, secret)
 }
 func (s *Service) health(ctx context.Context) {
 	s.mu.Lock()
-	if s.status.State != "armed" || s.activeRoute == nil {
+	if !activeState(s.status.State) || s.activeRoute == nil {
 		s.mu.Unlock()
 		return
 	}
@@ -289,16 +369,18 @@ func (s *Service) health(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	s.mu.Lock()
-	if s.generation != g || s.status.State != "armed" {
+	if s.generation != g || !activeState(s.status.State) {
 		s.mu.Unlock()
 		return
 	}
 	s.cancelHealth = cancel
 	s.mu.Unlock()
-	p, e := s.inspect(ctx, policy(c))
-	if e != nil || !p.Active || p.PolicyHash != enforce.Hash(policy(c)) {
-		_ = s.block(g, "系统过滤状态变化，入口已关闭")
-		return
+	if c.EnforcementMode == "required" {
+		p, e := s.inspect(ctx, policy(c))
+		if e != nil || !p.Active || p.PolicyHash != enforce.Hash(policy(c)) {
+			_ = s.block(g, "系统过滤状态变化，入口已关闭")
+			return
+		}
 	}
 	next, e := r.Fingerprint(ctx)
 	if e != nil || fp != next {
@@ -329,6 +411,7 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	s.closeLocked()
 	g, c, secret := s.generation, copyConfig(s.config), s.secret
+	username, password := s.proxyUsername, s.proxyPassword
 	s.cancelCheck = cancel
 	s.status.State = "checking"
 	s.status.FilterActive = false
@@ -338,7 +421,7 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 	if e := validateConfig(c, false); e != nil {
 		return "", s.block(g, e.Error())
 	}
-	r, e := s.makeRoute(c, secret)
+	r, e := s.routeFor(ctx, c, secret, username, password)
 	if e != nil {
 		return "", s.block(g, e.Error())
 	}

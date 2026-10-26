@@ -37,6 +37,7 @@ type Service interface {
 	Arm(context.Context) error
 	Disarm()
 	SetSecret(string)
+	SetProxyCredentials(string, string) error
 	Events() []model.Event
 }
 
@@ -212,6 +213,23 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, 400, err.Error())
 			return
 		}
+	case "/api/proxy-credentials":
+		var body struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if !h.decode(w, r, &body) {
+			return
+		}
+		if len(body.Username) > 4096 || len(body.Password) > 4096 {
+			h.fail(w, 400, "代理账户或密码过长")
+			return
+		}
+		if err := h.service.SetProxyCredentials(body.Username, body.Password); err != nil {
+			// Never reflect credentials, including in a dependency's error string.
+			h.fail(w, 400, "代理账户格式无效或当前来源不支持账户，请检查设置")
+			return
+		}
 	case "/api/secret":
 		var body struct {
 			Secret string `json:"secret"`
@@ -235,7 +253,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, 409, err.Error())
 			return
 		}
-		h.json(w, 200, map[string]string{"candidateIP": ip, "message": "仅代表守护进程的候选出口，未保存为期望 IP，保护入口保持关闭"})
+		h.json(w, 200, map[string]string{"candidateIP": ip, "message": "仅代表守护进程的候选出口，未保存为期望 IP，代理仍未启用"})
 		return
 	case "/api/check", "/api/arm":
 		if !h.decode(w, r, &struct{}{}) {
@@ -259,8 +277,14 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		if !h.decode(w, r, &body) {
 			return
 		}
-		if h.service.Status().State != "armed" {
-			h.fail(w, 409, "保护尚未启用，禁止启动受保护入口")
+		current := h.service.Status()
+		config := h.service.Config()
+		if (body.SessionRevision != nil && *body.SessionRevision != current.SessionRevision) || (enforcementMode(config.EnforcementMode) == "proxy-only" && body.SessionRevision == nil) {
+			h.fail(w, 409, "会话已变化，请刷新状态后重新选择启动入口")
+			return
+		}
+		if !launchReady(config, current) {
+			h.fail(w, 409, "当前会话尚未启用或模式不匹配，禁止启动入口")
 			return
 		}
 		var err error
@@ -318,7 +342,7 @@ func (h *handler) snapshot(w http.ResponseWriter) {
 		Status      model.Status  `json:"status"`
 		Events      []model.Event `json:"events"`
 		LaunchReady bool          `json:"launchReady"`
-	}{h.service.Config(), status, h.service.Events(), status.State == "armed" && status.FilterActive})
+	}{h.service.Config(), status, h.service.Events(), launchReady(h.service.Config(), status)})
 }
 func (h *handler) fail(w http.ResponseWriter, code int, message string) {
 	h.json(w, code, map[string]string{"error": message})

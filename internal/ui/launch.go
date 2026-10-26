@@ -23,9 +23,10 @@ import (
 )
 
 type launchRequest struct {
-	Kind                    string `json:"kind"`
-	Path                    string `json:"path"`
-	AcknowledgeProgramScope bool   `json:"acknowledgeProgramScope"`
+	Kind                    string  `json:"kind"`
+	SessionRevision         *uint64 `json:"sessionRevision,omitempty"`
+	Path                    string  `json:"path"`
+	AcknowledgeProgramScope bool    `json:"acknowledgeProgramScope"`
 }
 
 func launchBrowser(service Service, request launchRequest) error {
@@ -65,8 +66,10 @@ func browserCommand(c model.Config, s model.Status, r launchRequest, platform, p
 		if base != "Google Chrome" && base != "Microsoft Edge" {
 			return nil, errors.New("仅支持 Google Chrome / Microsoft Edge 的实际可执行文件")
 		}
-		if err := verifyMacHelpers(path, c.Programs); err != nil {
-			return nil, err
+		if enforcementMode(c.EnforcementMode) == "required" {
+			if err := verifyMacHelpers(path, c.Programs); err != nil {
+				return nil, err
+			}
 		}
 	default:
 		return nil, errors.New("当前平台尚未支持受保护浏览器启动")
@@ -88,23 +91,46 @@ func browserCommand(c model.Config, s model.Status, r launchRequest, platform, p
 		"--new-window", "about:blank"), nil
 }
 
-func validatedTarget(c model.Config, s model.Status, r launchRequest, platform string) (string, string, error) {
-	if s.State != "armed" || !s.FilterActive {
-		return "", "", errors.New("保护尚未启用，禁止启动受保护入口")
+// Empty mode is the legacy strict contract, never an implicit downgrade.
+func enforcementMode(mode string) string {
+	if mode == "" {
+		return "required"
 	}
-	if !r.AcknowledgeProgramScope {
+	return mode
+}
+
+func launchReady(c model.Config, s model.Status) bool {
+	mode := enforcementMode(c.EnforcementMode)
+	if mode != enforcementMode(s.EnforcementMode) {
+		return false
+	}
+	if mode == "proxy-only" {
+		return s.State == "proxy_active" && !s.FilterActive
+	}
+	return mode == "required" && s.State == "armed" && s.FilterActive
+}
+
+func validatedTarget(c model.Config, s model.Status, r launchRequest, platform string) (string, string, error) {
+	if !launchReady(c, s) {
+		return "", "", errors.New("当前会话尚未启用或模式不匹配，禁止启动入口")
+	}
+	if r.SessionRevision != nil && *r.SessionRevision != s.SessionRevision {
+		return "", "", errors.New("会话已变化，请刷新状态后重新选择启动入口")
+	}
+	strict := enforcementMode(c.EnforcementMode) == "required"
+	if strict && !r.AcknowledgeProgramScope {
 		return "", "", errors.New("请明确确认：程序级过滤会影响同一程序的所有资料目录和窗口")
 	}
 	path, err := canonicalExecutable(r.Path, platform)
 	if err != nil {
 		return "", "", err
 	}
-	if !listedExecutable(path, c.Programs, platform) {
+	if strict && !listedExecutable(path, c.Programs, platform) {
 		return "", "", errors.New("所选程序未以规范化绝对路径列入当前系统过滤策略；请先添加实际路径并重新安装及验证策略")
 	}
 	wantProxy := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(c.ProxyPort)))
 	if c.ProxyPort == 0 || s.ProxyAddress != wantProxy {
-		return "", "", errors.New("保护代理地址与当前配置不匹配")
+		return "", "", errors.New("代理地址与当前配置不匹配")
 	}
 	return path, wantProxy, nil
 }
@@ -125,15 +151,17 @@ func claudeCommand(c model.Config, s model.Status, r launchRequest, platform str
 		if filepath.Base(path) != "Claude" {
 			return nil, errors.New("请选择 Claude.app/Contents/MacOS/Claude")
 		}
-		if err := verifyMacHelpers(path, c.Programs); err != nil {
-			return nil, err
+		if enforcementMode(c.EnforcementMode) == "required" {
+			if err := verifyMacHelpers(path, c.Programs); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		return nil, errors.New("当前平台尚未支持 Claude 桌面端启动")
 	}
-	// Electron supports these proxy switches. A particular Claude version may
-	// override them; the OS policy still denies its non-proxy network attempts.
-	return exec.Command(path, "--proxy-server=http://"+proxy, "--proxy-bypass-list=<-loopback>", "--disable-quic", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"), nil
+	// Electron supports these switches, but a Claude version may override them.
+	// Only required mode has a separate OS policy for non-proxy traffic.
+	return exec.Command(path, "--proxy-server=http://"+proxy, "--proxy-bypass-list=<-loopback>;"+proxy, "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"), nil
 }
 
 func launchClaude(service Service, r launchRequest) error {
@@ -150,8 +178,9 @@ func launchClaude(service Service, r launchRequest) error {
 
 func startIfArmed(service Service, expected model.Status, command *exec.Cmd) error {
 	current := service.Status()
-	if current.State != "armed" || !current.FilterActive || current.PolicyHash != expected.PolicyHash || current.ProxyAddress != expected.ProxyAddress {
-		return errors.New("保护状态已变化，启动已取消；请重新检查后再试")
+	config := service.Config()
+	if !launchReady(config, current) || current.State != expected.State || current.EnforcementMode != expected.EnforcementMode || current.FilterActive != expected.FilterActive || current.SessionRevision != expected.SessionRevision || current.PolicyHash != expected.PolicyHash || current.ProxyAddress != expected.ProxyAddress || current.ProxyAddress != net.JoinHostPort("127.0.0.1", strconv.Itoa(int(config.ProxyPort))) {
+		return errors.New("会话状态已变化，启动已取消；请重新检查后再试")
 	}
 	if err := command.Start(); err != nil {
 		return errors.New("目标程序未能启动，请检查安装文件与系统权限")
