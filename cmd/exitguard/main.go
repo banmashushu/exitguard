@@ -19,6 +19,7 @@ import (
 	"exitguard/internal/diagnostics"
 	"exitguard/internal/enforce"
 	"exitguard/internal/guard"
+	"exitguard/internal/nativeapp"
 	"exitguard/internal/ui"
 )
 
@@ -38,8 +39,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		args = args[1:]
 	}
 	if command == "help" || (len(args) > 0 && (args[0] == "--help" || args[0] == "-h")) {
-		_, _ = io.WriteString(stdout, "ExitGuard — 本机固定出口控制\n\n  exitguard serve [--no-open] [--config PATH]\n  exitguard inspect [--config PATH]\n  exitguard doctor [--output PATH]  # 只读环境报告，不检查保护状态\n  exitguard filter-install [--config PATH]  # 仅在明确部署时执行，需要系统权限\n  exitguard filter-remove [--config PATH]   # 移除本产品规则\n\nserve/server 在守护代理的回环端口提供控制面板。stdout 仅输出一次含会话凭证的 ready JSON，请勿公开该输出。\n")
+		_, _ = io.WriteString(stdout, "ExitGuard — 本机固定出口控制\n\n  exitguard serve [--no-open] [--config PATH] [--native-console]\n  exitguard inspect [--config PATH]\n  exitguard native-template --output PATH  # 离线配置片段，不改系统\n  exitguard native-stage --output PATH     # 暂存三个新箱的配置计划\n  exitguard native-apply --plan PATH       # 显式应用已审核计划\n  exitguard native-inspect                 # Windows 原生预览前置检查\n  exitguard native-probe --target chrome   # 在产品箱内运行实际观测探针\n  exitguard doctor [--output PATH]  # 只读环境报告，不检查保护状态\n  exitguard filter-install [--config PATH]  # 仅在明确部署时执行，需要系统权限\n  exitguard filter-remove [--config PATH]   # 移除本产品规则\n\nserve/server 在守护代理的回环端口提供控制面板。stdout 仅输出一次含会话凭证的 ready JSON，请勿公开该输出。\n")
 		return nil
+	}
+	if command == "native-template" || command == "native-stage" || command == "native-apply" || command == "native-inspect" || command == "native-probe" {
+		nativeCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
+		defer cancel()
+		return nativeCommand(nativeCtx, command, args, stdout, stderr)
 	}
 	// Keep read-only diagnosis before config-directory lookup and guard.New.
 	if command == "doctor" {
@@ -55,6 +61,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("exitguard "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", filepath.Join(configDir, "ExitGuard", "config.json"), "本机配置文件")
+	consoleMode := flags.Bool("native-console", false, "Windows 应用保护试用控制窗口，不依赖浏览器持续打开")
 	noOpen := flags.Bool("no-open", false, "不自动打开控制面板")
 	_ = flags.Bool("ready-json", true, "stdout 仅输出一次机器可读就绪消息")
 	if err := flags.Parse(args); err != nil {
@@ -63,12 +70,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("不接受额外参数")
 	}
+	if *consoleMode && runtime.GOOS != "windows" {
+		return errors.New("应用保护试用窗口仅支持 Windows")
+	}
 	service, err := guard.New(*configPath)
 	if err != nil {
 		return err
 	}
 	if command == "serve" || command == "server" {
-		return serve(ctx, service, *noOpen, stdout, stderr)
+		return serve(ctx, service, *noOpen, *consoleMode, stdout, stderr)
 	}
 	c := service.Config()
 	policy := enforce.Policy{Port: c.ProxyPort, Programs: c.Programs, BundleIDs: c.BundleIDs}
@@ -102,7 +112,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func serve(ctx context.Context, service *guard.Service, noOpen bool, stdout, stderr io.Writer) error {
+func serve(ctx context.Context, service *guard.Service, noOpen, consoleMode bool, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	control, launchURL, err := ui.NewControl(service, service.Status().ProxyAddress)
@@ -120,13 +130,26 @@ func serve(ctx context.Context, service *guard.Service, noOpen bool, stdout, std
 	if err := service.WaitReady(readyCtx); err != nil {
 		return err
 	}
-	if err := json.NewEncoder(stdout).Encode(ui.Ready{Ready: true, URL: launchURL}); err != nil {
-		return err
+	if !consoleMode {
+		if err := json.NewEncoder(stdout).Encode(ui.Ready{Ready: true, URL: launchURL}); err != nil {
+			return err
+		}
 	}
 	if !noOpen && runtime.GOOS == "windows" {
 		if err := openPanel(launchURL); err != nil {
 			_, _ = io.WriteString(stderr, "控制面板未自动打开；请使用原生启动器或保密读取 ready 通道。\n")
 		}
+	}
+	if consoleMode {
+		go func() {
+			_ = nativeConsole(ctx, service, os.Stdin, stderr, func() error {
+				if err := nativeapp.RequireTargetsStopped(); err != nil {
+					return err
+				}
+				return openPanel(launchURL)
+			})
+			cancel()
+		}()
 	}
 	select {
 	case <-ctx.Done():

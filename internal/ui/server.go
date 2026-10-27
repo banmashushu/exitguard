@@ -204,6 +204,31 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.action.Unlock()
 	switch r.URL.Path {
+	case "/api/native-launch-preview":
+		var body struct {
+			Target             string  `json:"target"`
+			Path               string  `json:"path"`
+			SessionRevision    *uint64 `json:"sessionRevision"`
+			AcknowledgePreview bool    `json:"acknowledgePreview"`
+		}
+		if !h.decode(w, r, &body) {
+			return
+		}
+		if body.SessionRevision == nil {
+			h.fail(w, 400, "请刷新当前会话再启动原生预览")
+			return
+		}
+		launcher, ok := h.service.(interface {
+			LaunchNativePreview(context.Context, string, string, uint64, bool) error
+		})
+		if !ok {
+			h.fail(w, 409, "当前服务没有 Windows 原生预览适配器")
+			return
+		}
+		if err := launcher.LaunchNativePreview(r.Context(), body.Target, body.Path, *body.SessionRevision, body.AcknowledgePreview); err != nil {
+			h.fail(w, 409, err.Error())
+			return
+		}
 	case "/api/config":
 		var config model.Config
 		if !h.decode(w, r, &config) {

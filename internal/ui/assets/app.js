@@ -39,7 +39,7 @@
     setText("state-label","本机服务离线");setText("state-heading","无法连接本机服务");
     setText("reason","请重新打开 ExitGuard。旧状态不能用于继续启动应用。");
     setText("filter-note","系统过滤状态未知；当前页面没有可用的本机会话。");
-    ["arm","disarm","launch","launch-claude","save-proxy-credentials"].forEach(id=>$(id).disabled=true);
+    ["arm","disarm","launch","launch-claude","native-launch","save-proxy-credentials"].forEach(id=>$(id).disabled=true);
     $("check").disabled=false;$("candidate").disabled=false;
   }
   function render(data,fill=false) {
@@ -49,6 +49,9 @@
     setText("state-label",state[0]);setText("state-heading",state[1]);setText("reason",s.reason);
     // Proxy forwarding gets a neutral blue state, never the strict OS-proof green.
     $("status-card").className="status-card"+(s.state==="armed"&&running?" armed":s.state==="proxy_active"&&running?" proxy-active":s.state==="blocked"||s.state==="unconfigured"?" blocked":"");
+    $("native-preview").hidden=s.platform!=="windows";
+    $("native-launch").disabled=busy||editing||s.platform!=="windows"||!proxy||!running||c.proxyPort!==17890;
+    setText("native-status",s.nativeReason||"尚未完成 Windows 实机测试。断线、登录与应用兼容性仍需验证，当前没有完整保护证明。");
     const mac=s.platform==="darwin";
     setText("platform",mac?"◉ macOS · 本机":s.platform==="windows"?"◉ Windows · 本机":s.platform+" · 本机");
     setText("source",c.mode==="remote"?"远程代理":c.mode==="proxy"?"本地固定专用入口":c.mode==="clash"?"Clash / Mihomo（只读）":c.mode==="feilian"?"公司飞连":"尚未配置");
@@ -156,6 +159,10 @@
     if(strict&&!$("scope-ack").checked)return notice("请确认已了解同一程序的所有窗口都会受到系统过滤。");
     return action("launch",{kind,path,acknowledgeProgramScope:strict&&$("scope-ack").checked,sessionRevision:snapshot.status.sessionRevision||0},kind==="browser"?"已启动独立浏览器。请在使用设备验证出口与断线行为。":strict?"已提交 Claude 启动；仍需验证登录、聊天、上传与系统覆盖。":"已提交 Claude 启动；只有采用代理参数的连接经此转发，其他流量可能直连。请验证当前版本的登录、聊天与上传。");
   }
+  $("native-launch").onclick=()=>{
+    if(!snapshot||!$("native-ack").checked)return notice("请先确认应用保护试用范围，并完全退出所选应用。");
+    return action("native-launch-preview",{target:$("native-target").value,path:$("native-path").value.trim(),sessionRevision:snapshot.status.sessionRevision,acknowledgePreview:true},"已提交应用保护试用。尚未完成 Windows 实机测试，请确认新窗口出现在对应的 Sandboxie 分组中。");
+  };
   $("launch").onclick=()=>launch("browser","browser-path");$("launch-claude").onclick=()=>launch("claude","claude-path");
   $("config-form").addEventListener("input",event=>{
     if (["proxy-username","proxy-password","clash-secret"].includes(event.target.id)) return;

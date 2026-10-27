@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ type route interface {
 	Close() error
 }
 type Service struct {
+	prepareNative   func(context.Context, string, string) (*exec.Cmd, error)
 	mu              sync.Mutex
 	checkMu         sync.Mutex
 	configPath      string

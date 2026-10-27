@@ -15,6 +15,8 @@ ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它�
 
 本应用不会修改全局代理、默认路由、系统 DNS、公司飞连或订阅，不安装根证书，不解密目标 HTTPS。
 
+Windows 的 Chrome / Edge / Claude 另有 **原生沙箱预览**：`sh scripts/package-windows-native.sh` 生成 `dist/ExitGuard-Windows-Native-Preview.zip`。它使用单独安装的官方 Sandboxie Plus v1.18.8，在现有桌面上仅通过产品箱启动应用；不使用虚拟机或整机分流。运行时有效策略与四个 WFP 回调均需实际核对，DNS broker 和三款应用仍待 Windows 验收，状态始终为 `preview-incomplete`。普通快捷方式和已有窗口不自动归组。详见 [原生预览说明](docs/windows-native-preview.md)。
+
 ## 构建与启动
 
 需要 Go 1.23 或更新版本。Mac 图形应用需要 macOS 13+、Apple 命令行开发工具和 Swift 编译器，无第三方运行时。

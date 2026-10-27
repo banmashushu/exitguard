@@ -19,6 +19,8 @@ type Config struct {
 }
 
 type Status struct {
+	NativeState            string `json:"nativeState,omitempty"`
+	NativeReason           string `json:"nativeReason,omitempty"`
 	EnforcementMode        string `json:"enforcementMode"`
 	UpstreamCredentialsSet bool   `json:"upstreamCredentialsSet"`
 	SessionRevision        uint64 `json:"sessionRevision"`
