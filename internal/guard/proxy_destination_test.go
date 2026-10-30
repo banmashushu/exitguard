@@ -32,6 +32,7 @@ type destinationFixture struct {
 	badOrigin  atomic.Uint32
 	authDenied atomic.Bool
 	stop       func()
+	restart    func() error
 	stalled    chan struct{}
 }
 
@@ -150,14 +151,11 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 	if e != nil {
 		t.Fatal(e)
 	}
-	var stopOnce sync.Once
-	f.stop = func() { stopOnce.Do(func() { l.Close() }) }
 	var sessions sync.WaitGroup
-	acceptDone := make(chan struct{})
-	go func() {
+	acceptLoop := func(listener net.Listener, acceptDone chan struct{}) {
 		defer close(acceptDone)
 		for {
-			c, e := l.Accept()
+			c, e := listener.Accept()
 			if e != nil {
 				return
 			}
@@ -227,10 +225,38 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 				<-done
 			}()
 		}
-	}()
-	t.Cleanup(func() { f.stop(); <-acceptDone; sessions.Wait() })
+	}
+	address := l.Addr().String()
+	var listenerMu sync.Mutex
+	currentListener, currentDone := l, make(chan struct{})
+	go acceptLoop(currentListener, currentDone)
+	f.stop = func() {
+		listenerMu.Lock()
+		listener, done := currentListener, currentDone
+		currentListener = nil
+		listenerMu.Unlock()
+		if listener != nil {
+			listener.Close()
+			<-done
+		}
+	}
+	f.restart = func() error {
+		listenerMu.Lock()
+		defer listenerMu.Unlock()
+		if currentListener != nil {
+			return fmt.Errorf("fixture already listening")
+		}
+		next, e := net.Listen("tcp4", address)
+		if e != nil {
+			return e
+		}
+		currentListener, currentDone = next, make(chan struct{})
+		go acceptLoop(currentListener, currentDone)
+		return nil
+	}
+	t.Cleanup(func() { f.stop(); sessions.Wait() })
 	f.s = configured(t)
-	c := remoteConfig("socks5://" + l.Addr().String())
+	c := remoteConfig("socks5://" + address)
 	c.ProxyPort, c.ExpectedIPs = f.s.Config().ProxyPort, []string{"203.0.113.7"}
 	c.ProbeURL, c.DNSResolverURL, c.DNSBootstrapIP = "https://example.com/ip", "https://example.com/dns-query", "203.0.113.53"
 	if e := f.s.SaveConfig(c); e != nil {

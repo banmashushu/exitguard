@@ -31,6 +31,9 @@ const (
 	probeUpstreamSOCKSProtocol
 	probeTLSFailure
 	probeDestinationUnavailable
+	probeUnknownFailure
+	probeUnknownReadFailure
+	probeTLSProtocolFailure
 )
 
 // A probeError contains only an enumerated cause and an HTTP status number.
@@ -50,7 +53,7 @@ func (e *probeError) Error() string {
 		return "公网探测地址无效"
 	case probeHTTPStatus:
 		return fmt.Sprintf("公网探测收到 HTTP %d", e.status)
-	case probeBodyRead:
+	case probeBodyRead, probeUnknownReadFailure:
 		return "公网探测响应读取失败"
 	case probeBodyLimit:
 		return "公网探测响应超过大小限制"
@@ -68,6 +71,8 @@ func (e *probeError) Error() string {
 		return "SOCKS5 代理返回一般故障或不支持的连接响应"
 	case probeTLSFailure:
 		return "公网探测 TLS 证书验证失败"
+	case probeTLSProtocolFailure:
+		return "公网探测 TLS 协议验证失败"
 	case probeDestinationUnavailable:
 		return "指定出口无法连接公网探测目标"
 	default:
@@ -105,11 +110,36 @@ func safeProbeError(e error) *probeError {
 	if errors.As(e, &certificate) {
 		return &probeError{kind: probeTLSFailure}
 	}
+	var alert tls.AlertError
+	var record tls.RecordHeaderError
+	if errors.As(e, &alert) || errors.As(e, &record) {
+		return &probeError{kind: probeTLSProtocolFailure}
+	}
+	for cause := e; cause != nil; cause = errors.Unwrap(cause) {
+		if op, ok := cause.(*net.OpError); ok && (op.Op == "remote error" || op.Op == "local error") {
+			return &probeError{kind: probeTLSProtocolFailure}
+		}
+	}
 	var unavailable *destinationError
 	if errors.As(e, &unavailable) {
 		return &probeError{kind: probeDestinationUnavailable}
 	}
-	return &probeError{kind: probeNetworkFailure}
+	if networkTransportError(e) {
+		return &probeError{kind: probeNetworkFailure}
+	}
+	return &probeError{kind: probeUnknownFailure}
+}
+
+func networkTransportError(e error) bool {
+	var transport *net.OpError
+	if !errors.As(e, &transport) || transport.Op != "dial" && transport.Op != "read" && transport.Op != "write" {
+		return false
+	}
+	var nested *net.OpError
+	if errors.As(transport.Err, &nested) {
+		return networkTransportError(nested)
+	}
+	return true
 }
 
 func validProbeIP(raw string) (string, error) {
@@ -141,10 +171,13 @@ func probeIP(ctx context.Context, r interface {
 	}
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4097))
 	if e != nil {
-		if cause := safeProbeError(e); cause.kind == probeTimeout || cause.kind == probeCancelled {
+		if cause := safeProbeError(e); cause.kind == probeTimeout || cause.kind == probeCancelled || cause.kind == probeNetworkFailure {
 			return "", cause
 		}
-		return "", &probeError{kind: probeBodyRead}
+		if errors.Is(e, io.ErrUnexpectedEOF) {
+			return "", &probeError{kind: probeBodyRead}
+		}
+		return "", &probeError{kind: probeUnknownReadFailure}
 	}
 	if len(b) > 4096 {
 		return "", &probeError{kind: probeBodyLimit}

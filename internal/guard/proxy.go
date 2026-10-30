@@ -24,6 +24,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.running = true
 	s.started = true
+	s.runContext = ctx
 	c := s.config
 	s.mu.Unlock()
 	listener, e := net.Listen("tcp4", proxyAddress(c))
@@ -81,6 +82,7 @@ func (s *Service) Run(ctx context.Context) error {
 	close(healthDone)
 	s.mu.Lock()
 	s.running = false
+	s.runContext = nil
 	s.listener = nil
 	s.boundPort = 0
 	s.closeLocked()
@@ -146,7 +148,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if _, e := r.Fingerprint(req.Context()); e != nil {
-		s.blockProxyFailure(req, g, "出口路径变化，入口已关闭")
+		s.blockProxyFailure(req, g, "出口路径变化，入口已关闭", nil)
 		return
 	}
 	upstream, e := r.DialContext(req.Context(), "tcp", target)
@@ -165,7 +167,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		if errors.As(e, &failed) {
 			reason = failed.Error() + "，入口已关闭"
 		}
-		s.blockProxyFailure(req, g, reason)
+		s.blockProxyFailure(req, g, reason, e)
 		return
 	}
 	if !s.track(upstream, g) {
@@ -302,10 +304,19 @@ func (s *Service) failProxyRequest(w http.ResponseWriter, req *http.Request, g u
 	http.Error(w, reason, status)
 }
 
-func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string) {
+func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string, cause error) {
 	// A client abandoning one request says nothing about the verified route.
 	// Upstream timeouts still block when this downstream request remains live.
 	if req.Context().Err() == nil {
+		var upstream *upstreamError
+		if errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达" {
+			s.mu.Lock()
+			recovering := s.beginRecoveryLocked(g, reason)
+			s.mu.Unlock()
+			if recovering {
+				return
+			}
+		}
 		_ = s.block(g, reason)
 	}
 }

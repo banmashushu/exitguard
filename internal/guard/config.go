@@ -92,6 +92,9 @@ func validateConfig(c model.Config, complete bool) error {
 	if c.EnforcementMode != "required" && c.EnforcementMode != "proxy-only" {
 		return errors.New("请选择代理转发或严格阻断模式")
 	}
+	if c.AutoRecover && c.EnforcementMode != "proxy-only" {
+		return errors.New("自动恢复仅支持代理转发方式；严格阻断需手动重新检查")
+	}
 	if c.Mode != "clash" && c.Mode != "feilian" && c.Mode != "proxy" && c.Mode != "remote" {
 		return errors.New("出口来源无效")
 	}

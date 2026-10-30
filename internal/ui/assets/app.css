@@ -5,3 +5,4 @@
 .development-note{font-size:10px;color:#94866e;background:#f4f0e6;border:1px solid #e7e0cf;padding:9px 13px;border-radius:7px;margin:-15px 0 22px}
 
 .status-card.proxy-active{background:#304e65}.proxy-active .status-dot{background:#adc6de}.secret-box+.muted{margin-top:12px}#save-proxy-credentials{margin-bottom:8px}#save-proxy-credentials+.subtle-note{display:block}
+.status-card.recovering{background:#6b5837}.recovering .status-dot{background:#f0cb8f}

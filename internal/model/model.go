@@ -4,6 +4,7 @@ package model
 type Config struct {
 	Mode               string   `json:"mode"`
 	EnforcementMode    string   `json:"enforcementMode"`
+	AutoRecover        bool     `json:"autoRecover"`
 	ExpectedIPs        []string `json:"expectedIPs"`
 	ProxyURL           string   `json:"proxyURL"`
 	ClashControllerURL string   `json:"clashControllerURL"`
@@ -32,6 +33,9 @@ type Status struct {
 	ProxyAddress           string `json:"proxyAddress"`
 	Platform               string `json:"platform"`
 	CheckedAt              string `json:"checkedAt"`
+	RecoveryAttempt        int    `json:"recoveryAttempt,omitempty"`
+	RecoveryMaxAttempts    int    `json:"recoveryMaxAttempts,omitempty"`
+	NextRetryAt            string `json:"nextRetryAt,omitempty"`
 }
 
 type Event struct {

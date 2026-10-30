@@ -8,6 +8,7 @@
   const states = {
     unconfigured:["尚未配置","请先填写上游与期望 IP"],
     checking:["正在检查","正在验证出口路径"],
+    recovering:["转发已暂停 · 正在恢复","核验原出口后自动恢复"],
     blocked:["连接已关闭","出口检查未通过"],
     ready:["严格检查通过","等待启用严格阻断"],
     armed:["严格阻断已启用","当前程序策略已验证"],
@@ -46,9 +47,15 @@
     snapshot=data;
     const c=data.config,s=data.status,proxy=isProxy(c),state=states[s.state]||[s.state,"状态未知"];
     const running=active(c,s);
+    const recovering=matchesMode(c,s)&&s.state==="recovering";
     setText("state-label",state[0]);setText("state-heading",state[1]);setText("reason",s.reason);
+    $("recovery-status").hidden=!recovering;
+    if(recovering) {
+      const attempt=(s.recoveryAttempt||1)+" / "+(s.recoveryMaxAttempts||3);
+      setText("recovery-status",s.nextRetryAt?"第 "+attempt+" 次；下次核验："+new Date(s.nextRetryAt).toLocaleTimeString("zh-CN",{hour12:false}):"第 "+attempt+" 次核验中；确认同一路径和同一公网 IP 前保持暂停。");
+    }
     // Proxy forwarding gets a neutral blue state, never the strict OS-proof green.
-    $("status-card").className="status-card"+(s.state==="armed"&&running?" armed":s.state==="proxy_active"&&running?" proxy-active":s.state==="blocked"||s.state==="unconfigured"?" blocked":"");
+    $("status-card").className="status-card"+(s.state==="armed"&&running?" armed":s.state==="proxy_active"&&running?" proxy-active":recovering?" recovering":s.state==="blocked"||s.state==="unconfigured"?" blocked":"");
     $("native-preview").hidden=s.platform!=="windows";
     $("native-launch").disabled=busy||editing||s.platform!=="windows"||!proxy||!running||c.proxyPort!==17890;
     setText("native-status",s.nativeReason||"尚未完成 Windows 实机测试。断线、登录与应用兼容性仍需验证，当前没有完整保护证明。");
@@ -74,7 +81,7 @@
     $("step-filter").classList.toggle("done",running);
     $("check").disabled=busy;$("candidate").disabled=busy;
     $("arm").disabled=busy||editing||!ready(c,s);
-    $("disarm").disabled=!running;
+    $("disarm").disabled=!(running||recovering);
     $("launch").disabled=busy||editing||!running;$("launch-claude").disabled=busy||editing||!running;
     $("save-proxy-credentials").disabled=busy||editing||c.mode!=="remote";
     setText("diag-state",state[0]+" · "+s.state);setText("diag-filter",proxy?"本模式不核验系统防绕行":s.filterActive?"当前策略匹配":"未就绪");
@@ -110,6 +117,7 @@
     const remote=(c.mode==="remote"&&c.proxyURL||"").match(/^(https?|socks5):\/\/([^:/?#@]+):(\d+)$/);
     const fields={mode:c.mode||"remote","enforcement-mode":mode(c.enforcementMode),"expected-ips":(c.expectedIPs||[]).join(", "),"proxy-port":c.proxyPort||17890,"probe-url":c.probeURL||"https://api.ipify.org?format=json",tunnel:c.tunnelInterface||"","dns-url":c.dnsResolverURL||"https://cloudflare-dns.com/dns-query","dns-bootstrap":c.dnsBootstrapIP||"1.1.1.1",upstream:c.mode==="clash"?c.proxyURL||"":"","fixed-upstream":c.mode==="proxy"?c.proxyURL||"":"","remote-type":remote?remote[1]:"https","remote-server":remote?remote[2]:"","remote-port":remote?remote[3]:"",controller:c.clashControllerURL||"",selector:c.clashSelector||"",node:c.clashNode||"",programs:(c.programs||[]).join("\n"),"bundle-ids":(c.bundleIDs||[]).join("\n")};
     for (const [id,value] of Object.entries(fields)) $(id).value=value;
+    $("auto-recover").checked=!!c.autoRecover;
   }
   function config() {
     const source=$("mode").value;
@@ -120,10 +128,13 @@
       proxyURL=type+"://"+server+":"+port;
     } else if (source==="proxy") proxyURL=$("fixed-upstream").value.trim();
     else if (source==="clash") proxyURL=$("upstream").value.trim();
-    return {mode:source,enforcementMode:$("enforcement-mode").value,expectedIPs:lines($("expected-ips").value),proxyPort:Number($("proxy-port").value),probeURL:$("probe-url").value.trim(),tunnelInterface:source==="feilian"?$("tunnel").value.trim():"",dnsResolverURL:$("dns-url").value.trim(),dnsBootstrapIP:$("dns-bootstrap").value.trim(),proxyURL,clashControllerURL:source==="clash"?$("controller").value.trim():"",clashSelector:source==="clash"?$("selector").value.trim():"",clashNode:source==="clash"?$("node").value.trim():"",programs:lines($("programs").value),bundleIDs:lines($("bundle-ids").value)};
+    return {mode:source,enforcementMode:$("enforcement-mode").value,autoRecover:isProxy({enforcementMode:$("enforcement-mode").value})&&$("auto-recover").checked,expectedIPs:lines($("expected-ips").value),proxyPort:Number($("proxy-port").value),probeURL:$("probe-url").value.trim(),tunnelInterface:source==="feilian"?$("tunnel").value.trim():"",dnsResolverURL:$("dns-url").value.trim(),dnsBootstrapIP:$("dns-bootstrap").value.trim(),proxyURL,clashControllerURL:source==="clash"?$("controller").value.trim():"",clashSelector:source==="clash"?$("selector").value.trim():"",clashNode:source==="clash"?$("node").value.trim():"",programs:lines($("programs").value),bundleIDs:lines($("bundle-ids").value)};
   }
   function toggleMode() {
     const source=$("mode").value;
+    const supportsRecovery=isProxy({enforcementMode:$("enforcement-mode").value});
+    $("auto-recover").disabled=!supportsRecovery;
+    if(!supportsRecovery)$("auto-recover").checked=false;
     for (const item of ["remote","clash","feilian","proxy"]) $(item+"-settings").hidden=source!==item;
     setText("mode-help",isProxy({enforcementMode:$("enforcement-mode").value})?"仅代理遵循者的 IPv4 TCP。本模式不核验或更改系统防绕行规则。":"必须有匹配的系统过滤证明；出口检查不会替代系统部署。");
     setText("transport-note",$("remote-type").value==="https"?"HTTPS 会验证代理服务器证书，不支持忽略证书或自动降级。":"所选协议到代理服务器本身不加密，请确认你接受该链路与认证暴露范围。");

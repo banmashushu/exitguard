@@ -49,6 +49,11 @@ type Service struct {
 	started         bool
 	cancelCheck     context.CancelFunc
 	cancelHealth    context.CancelFunc
+	runContext      context.Context
+	armedIntent     bool
+	cancelRecovery  context.CancelFunc
+	recoveryWait    func(context.Context, time.Duration) error
+	recoverySlot    chan struct{}
 }
 
 func New(configPath string) (*Service, error) {
@@ -56,7 +61,7 @@ func New(configPath string) (*Service, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute}
+	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
 	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c)}
 	return s, nil
 }
@@ -78,6 +83,12 @@ func (s *Service) eventLocked(message string) {
 	}
 }
 func (s *Service) closeLocked() {
+	s.armedIntent = false
+	if s.cancelRecovery != nil {
+		s.cancelRecovery()
+		s.cancelRecovery = nil
+	}
+	s.status.RecoveryAttempt, s.status.RecoveryMaxAttempts, s.status.NextRetryAt = 0, 0, ""
 	if s.cancelCheck != nil {
 		s.cancelCheck()
 		s.cancelCheck = nil
@@ -225,6 +236,9 @@ func (s *Service) blockProbe(g uint64, ctx context.Context, stage string, failur
 	if failure != nil {
 		reason = stage + safeProbeError(failure).Error()
 		observed = ""
+		if transientRecoveryFailure(failure) && s.beginRecoveryLocked(g, reason) {
+			return errors.New(reason)
+		}
 	} else {
 		var e error
 		observed, e = validProbeIP(observed)
@@ -346,6 +360,7 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	}
 	s.activeRoute = r
 	s.fingerprint = after
+	s.armedIntent = arm
 	keep = true
 	s.status.State = "ready"
 	s.status.Reason = "入口已验证，可启用保护；真实客户端与断线验收仍需单独完成"
