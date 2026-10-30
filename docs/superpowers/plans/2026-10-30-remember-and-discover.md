@@ -52,9 +52,9 @@
 - [x] Integrate remember/clear UI and detected client choices, preserving manual and strict paths; test errors, restored status and option identity.
 - [x] Run covering/full/race/vet/frontend checks, cross-build supported artifacts, and review final source.
 - [x] Build staged Mac bundle; publish canonical only after root closes current product instances and confirms port free. Preserve the previous bundle and update the stable archive.
-- [ ] Root explicitly saves the authorized account in plaintext, verifies mode without printing contents, restarts once to confirm automatic loading, verifies discovered Chrome/Claude Desktop, checks/starts the same exit and runs a bounded live request.
+- [x] Root explicitly saves the authorized account in plaintext, verifies mode without printing contents, restarts once to confirm automatic loading, verifies discovered Chrome/Claude Desktop, checks/starts the same exit and runs a bounded live request.
 
-Actual plaintext save, permissions, restart restore, desktop dropdown discovery and exit check are accepted. The final connection activation is pending manual unlock of the Mac; see the dated review. Do not repeat saving or request the password again merely to activate the stored account.
+Actual plaintext save, permissions, restart restore, desktop dropdown discovery, exit check and connection activation are accepted after the user unlocked the Mac; see the dated review. Do not repeat saving or request the password again merely to activate the stored account.
 
 ## Ownership
 

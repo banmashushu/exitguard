@@ -10,7 +10,9 @@ The actual canonical Mac app was updated only after its old instance exited and 
 
 Root cleared its temporary credential variables, quit and reopened the app, then observed `已从本机恢复账户` without submitting credentials again. Both actual dropdowns displayed friendly discovered choices: Chrome and Claude Desktop / Code. No Claude task or desktop client was started. The restored account passed a real exit check with the user's current expected IP. A subsequent startup verification encountered a transient probe timeout; retry and final activation were interrupted by the Mac locking. Activation was not falsely reported as complete.
 
-Thus persistence/restart and actual desktop discovery are accepted. Final connection activation remains a user-unlock-dependent operational step. Restoring an account does not automatically arm the proxy. Claude Code-tab network coverage and full macOS system enforcement are not established by discovery.
+After the user unlocked the Mac, root observed the verified ready state and started forwarding without entering credentials again. The app reported proxy_active. A real Google request through the local proxy returned200. One ipify request timed out, so root independently checked the same proxy through Cloudflare's literal-IP HTTPS diagnostic endpoint; it returned the unchanged expected exit. The probe configuration was not changed.
+
+Persistence/restart, actual desktop discovery and current connection activation are accepted. Restoring an account does not automatically arm the proxy. Claude Code-tab network coverage and full macOS system enforcement are not established by discovery.
 
 Canonical app: `dist/ExitGuard.app`.
 Stable archive: `dist/ExitGuard-macOS-arm64-latest.zip`.
