@@ -20,22 +20,25 @@ type Config struct {
 }
 
 type Status struct {
-	NativeState            string `json:"nativeState,omitempty"`
-	NativeReason           string `json:"nativeReason,omitempty"`
-	EnforcementMode        string `json:"enforcementMode"`
-	UpstreamCredentialsSet bool   `json:"upstreamCredentialsSet"`
-	SessionRevision        uint64 `json:"sessionRevision"`
-	State                  string `json:"state"`
-	Reason                 string `json:"reason"`
-	ObservedIP             string `json:"observedIP"`
-	FilterActive           bool   `json:"filterActive"`
-	PolicyHash             string `json:"policyHash"`
-	ProxyAddress           string `json:"proxyAddress"`
-	Platform               string `json:"platform"`
-	CheckedAt              string `json:"checkedAt"`
-	RecoveryAttempt        int    `json:"recoveryAttempt,omitempty"`
-	RecoveryMaxAttempts    int    `json:"recoveryMaxAttempts,omitempty"`
-	NextRetryAt            string `json:"nextRetryAt,omitempty"`
+	NativeState                    string `json:"nativeState,omitempty"`
+	NativeReason                   string `json:"nativeReason,omitempty"`
+	EnforcementMode                string `json:"enforcementMode"`
+	UpstreamCredentialsSet         bool   `json:"upstreamCredentialsSet"`
+	UpstreamCredentialsSaved       bool   `json:"upstreamCredentialsSaved"`
+	UpstreamCredentialsRestored    bool   `json:"upstreamCredentialsRestored"`
+	CredentialPersistenceSupported bool   `json:"credentialPersistenceSupported"`
+	SessionRevision                uint64 `json:"sessionRevision"`
+	State                          string `json:"state"`
+	Reason                         string `json:"reason"`
+	ObservedIP                     string `json:"observedIP"`
+	FilterActive                   bool   `json:"filterActive"`
+	PolicyHash                     string `json:"policyHash"`
+	ProxyAddress                   string `json:"proxyAddress"`
+	Platform                       string `json:"platform"`
+	CheckedAt                      string `json:"checkedAt"`
+	RecoveryAttempt                int    `json:"recoveryAttempt,omitempty"`
+	RecoveryMaxAttempts            int    `json:"recoveryMaxAttempts,omitempty"`
+	NextRetryAt                    string `json:"nextRetryAt,omitempty"`
 }
 
 type Event struct {

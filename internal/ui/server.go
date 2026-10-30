@@ -170,6 +170,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) api(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/apps" {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			h.fail(w, 405, "不支持此操作")
+			return
+		}
+		h.json(w, 200, struct {
+			Apps []desktopApplication `json:"apps"`
+		}{discoverApplications()})
+		return
+	}
 	if r.URL.Path == "/api/snapshot" {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -242,6 +253,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
+			Remember bool   `json:"remember"`
 		}
 		if !h.decode(w, r, &body) {
 			return
@@ -250,9 +262,31 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, 400, "代理账户或密码过长")
 			return
 		}
-		if err := h.service.SetProxyCredentials(body.Username, body.Password); err != nil {
+		if body.Username == "" && body.Password == "" {
+			h.fail(w, 400, "未填写新账户；已有账户保持保留，需要清除时请使用清除按钮")
+			return
+		}
+		var err error
+		if setter, ok := h.service.(interface {
+			SetProxyCredentialsWithRemember(string, string, bool) error
+		}); ok {
+			err = setter.SetProxyCredentialsWithRemember(body.Username, body.Password, body.Remember)
+		} else if body.Remember {
+			err = errors.New("persistence unavailable")
+		} else {
+			err = h.service.SetProxyCredentials(body.Username, body.Password)
+		}
+		if err != nil {
 			// Never reflect credentials, including in a dependency's error string.
-			h.fail(w, 400, "代理账户格式无效或当前来源不支持账户，请检查设置")
+			h.fail(w, 400, "账户提交或本机保存失败，请查看当前状态后重试；保存数据可能仍保留")
+			return
+		}
+	case "/api/clear-proxy-credentials":
+		if !h.decode(w, r, &struct{}{}) {
+			return
+		}
+		if err := h.service.SetProxyCredentials("", ""); err != nil {
+			h.fail(w, 400, "账户未能完全清除；本机保存的数据可能仍保留，请查看状态并重试")
 			return
 		}
 	case "/api/secret":

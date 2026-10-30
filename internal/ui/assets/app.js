@@ -4,7 +4,7 @@
   const token = fragment.get("token") || "";
   history.replaceState(null, "", "/");
   const $ = id => document.getElementById(id);
-  let snapshot = null, busy = false, editing = false;
+  let snapshot = null, busy = false, editing = false, apps = [], credentialChoiceInitialized = false;
   const states = {
     unconfigured:["尚未配置","请先填写上游与期望 IP"],
     checking:["正在检查","正在验证出口路径"],
@@ -40,7 +40,7 @@
     setText("state-label","本机服务离线");setText("state-heading","无法连接本机服务");
     setText("reason","请重新打开 ExitGuard。旧状态不能用于继续启动应用。");
     setText("filter-note","系统过滤状态未知；当前页面没有可用的本机会话。");
-    ["arm","disarm","launch","launch-claude","native-launch","save-proxy-credentials"].forEach(id=>$(id).disabled=true);
+    ["arm","disarm","launch","launch-claude","native-launch","save-proxy-credentials","clear-proxy-credentials"].forEach(id=>$(id).disabled=true);
     $("check").disabled=false;$("candidate").disabled=false;
   }
   function render(data,fill=false) {
@@ -75,7 +75,14 @@
     $("scope-ack-row").hidden=proxy;
     setText("arm",proxy?"启动代理":"启用严格阻断");setText("disarm",proxy?"暂停代理":"暂停转发");
     setText("proxy-address",s.proxyAddress||"尚未监听");
-    setText("credentials-status",s.upstreamCredentialsSet?"已提交会话账户；不显示账户或密码。更改服务器或退出后需重新提交。":"账户未提交；无需认证的代理可留空。");
+    if(!credentialChoiceInitialized) {
+      $("remember-proxy-credentials").checked=!!s.upstreamCredentialsSaved;
+      credentialChoiceInitialized=true;
+    }
+    $("remember-proxy-credentials").disabled=!s.credentialPersistenceSupported;
+    if(!s.credentialPersistenceSupported)$("remember-proxy-credentials").checked=false;
+    setText("credential-storage-help",s.credentialPersistenceSupported?"勾选后将账户和密码明文保存在此设备，仅用于当前服务器。取消勾选并提交新账户会删除旧保存记录。":"当前平台账户仅供本次运行使用；退出后需重新提交。");
+    setText("credentials-status",s.upstreamCredentialsSaved?(s.upstreamCredentialsSet?(s.upstreamCredentialsRestored?"已从本机明文文件恢复账户；不显示账户或密码，仍需检查并手动启动。":"账户已明文保存在此设备；重开可载入，仍需检查并手动启动。") : "本机仍有保存账户，当前未载入；请重新提交或清除。") : s.upstreamCredentialsSet?"账户仅供本次运行使用；重开后需重新提交。":"账户未提交；无需认证的代理可留空。");
     $("step-source").classList.toggle("done",!!(c.proxyURL||c.tunnelInterface));
     $("step-ip").classList.toggle("done",!!c.expectedIPs?.length);
     $("step-filter").classList.toggle("done",running);
@@ -84,24 +91,27 @@
     $("disarm").disabled=!(running||recovering);
     $("launch").disabled=busy||editing||!running;$("launch-claude").disabled=busy||editing||!running;
     $("save-proxy-credentials").disabled=busy||editing||c.mode!=="remote";
+    $("clear-proxy-credentials").disabled=busy||editing;
     setText("diag-state",state[0]+" · "+s.state);setText("diag-filter",proxy?"本模式不核验系统防绕行":s.filterActive?"当前策略匹配":"未就绪");
     setText("diag-proxy",s.proxyAddress||"未监听");setText("diag-policy",s.policyHash||"无当前系统策略证明");setText("diag-checked",checked);
-    const browserPaths=[],claudePaths=[];
+    const browserApps=apps.filter(app=>app.kind==="browser"),claudeApps=apps.filter(app=>app.kind==="claude");
+    const browserPaths=browserApps.map(app=>app.path),claudePaths=claudeApps.map(app=>app.path);
     for (const path of c.programs||[]) {
       const base=path.split(/[\\/]/).pop();
-      if (/^(chrome\.exe|msedge\.exe|Google Chrome|Microsoft Edge)$/i.test(base)) browserPaths.push(path);
-      else if (/^(Claude|Claude\.exe)$/i.test(base)) claudePaths.push(path);
+      if (/^(chrome\.exe|msedge\.exe|Google Chrome|Microsoft Edge)$/i.test(base)&&!browserPaths.includes(path)) browserPaths.push(path);
+      else if ((base==="Claude"||s.platform==="windows"&&/^Claude\.exe$/i.test(base))&&!claudePaths.includes(path)) claudePaths.push(path);
     }
-    for (const [id,label,paths] of [["browser-path","显式选择已配置的浏览器程序",browserPaths],["claude-path","显式选择已配置的 Claude 程序",claudePaths]]) {
+    for (const [id,label,paths] of [["browser-path","选择浏览器",browserPaths],["claude-path","选择 Claude Desktop / Code",claudePaths]]) {
       const target=$(id);
+      const labels=paths.map(path=>{const app=apps.find(app=>app.path===path);return app?app.name+" · 已发现":path;});
       // Replacing options closes the native macOS menu during status polling.
-      if (target.options.length===paths.length+1&&target.options[0].value===""&&target.options[0].textContent===label&&paths.every((path,index)=>target.options[index+1].value===path)) continue;
+      if (target.options.length===paths.length+1&&target.options[0].value===""&&target.options[0].textContent===label&&paths.every((path,index)=>target.options[index+1].value===path&&target.options[index+1].textContent===labels[index])) continue;
       const prior=target.value;
       target.replaceChildren();const empty=document.createElement("option");empty.value="";empty.textContent=label;target.append(empty);
-      for (const path of paths) {const option=document.createElement("option");option.value=path;option.textContent=path;target.append(option);}
+      paths.forEach((path,index)=>{const option=document.createElement("option");option.value=path;option.textContent=labels[index];option.title=path;target.append(option);});
       target.value=paths.includes(prior)?prior:"";
     }
-    setText("claude-badge",claudePaths.length?"已配置 · 待实测":"可选 · 尚未配置");
+    setText("claude-badge",claudePaths.length?"可启动 · 覆盖待实测":"可选 · 未发现");
     const eventRoot=$("event-list");eventRoot.replaceChildren();eventRoot.className="";
     if (!data.events?.length) {eventRoot.className="events-empty";eventRoot.textContent="本次运行暂无事件";}
     for (const e of [...(data.events||[])].reverse()) {
@@ -124,7 +134,7 @@
     let proxyURL="";
     if (source==="remote") {
       const server=$("remote-server").value.trim(),port=Number($("remote-port").value),type=$("remote-type").value;
-      if (!server||/[\s:/@?#\\]/.test(server)||!Number.isInteger(port)||port<1||port>65535||!["http","https","socks5"].includes(type)) throw new Error("请分别填写代理类型、服务器主机名或 IPv4，以及有效端口。账户请通过会话账户按钮单独提交。");
+      if (!server||/[\s:/@?#\\]/.test(server)||!Number.isInteger(port)||port<1||port>65535||!["http","https","socks5"].includes(type)) throw new Error("请分别填写代理类型、服务器主机名或 IPv4，以及有效端口。账户请通过提交账户按钮单独提交。");
       proxyURL=type+"://"+server+":"+port;
     } else if (source==="proxy") proxyURL=$("fixed-upstream").value.trim();
     else if (source==="clash") proxyURL=$("upstream").value.trim();
@@ -165,11 +175,10 @@
   $("check").onclick=()=>action("check",{},"出口检查已完成。请核对当前方式和观察 IP，再明确启用。");
   $("arm").onclick=()=>action("arm",{},snapshot&&isProxy(snapshot.config)?"代理转发已启动；系统防绕行未核验。":"严格阻断已提交启用，请核对实际系统状态。");
   $("disarm").onclick=()=>action("disarm",{},"已暂停转发，并关闭本应用持有的连接。已有系统规则需单独核对。");
-  $("refresh").onclick=refresh;
   function launch(kind,id) {
     if(!snapshot||!active(snapshot.config,snapshot.status))return notice("当前会话未启用，请刷新后检查。");
     const path=$(id).value,strict=!isProxy(snapshot.config);
-    if(!path)return notice(kind==="browser"?"请先在可选启动路径中添加并明确选择 Chrome / Edge 可执行文件。":"尚未安装或配置 Claude；这不影响普通代理或浏览器使用。");
+    if(!path)return notice(kind==="browser"?"请选择已发现的 Chrome / Edge；也可在设置中添加实际路径。":"请选择 Claude Desktop / Code；未发现时可在设置中添加桌面端路径。");
     if(strict&&!$("scope-ack").checked)return notice("请确认已了解同一程序的所有窗口都会受到系统过滤。");
     return action("launch",{kind,path,acknowledgeProgramScope:strict&&$("scope-ack").checked,sessionRevision:snapshot.status.sessionRevision||0},kind==="browser"?"已启动独立浏览器。请在使用设备验证出口与断线行为。":strict?"已提交 Claude 启动；仍需验证登录、聊天、上传与系统覆盖。":"已提交 Claude 启动；只有采用代理参数的连接经此转发，其他流量可能直连。请验证当前版本的登录、聊天与上传。");
   }
@@ -179,21 +188,36 @@
   };
   $("launch").onclick=()=>launch("browser","browser-path");$("launch-claude").onclick=()=>launch("claude","claude-path");
   $("config-form").addEventListener("input",event=>{
-    if (["proxy-username","proxy-password","clash-secret"].includes(event.target.id)) return;
+    if (["proxy-username","proxy-password","remember-proxy-credentials","clash-secret"].includes(event.target.id)) return;
     editing=true;if(snapshot)render(snapshot);
   });
   for(const id of ["mode","enforcement-mode","remote-type"])$(id).addEventListener("change",toggleMode);
   $("config-form").addEventListener("submit",async e=>{
     e.preventDefault();
-    try {if(await action("config",config(),"设置已保存，会话已暂停。若需要账户，请单独提交，再测试或检查出口。")){editing=false;if(snapshot)render(snapshot);}}
+    try {if(await action("config",config(),"设置已保存，会话已暂停。更改服务器会清除账户，请核对账户状态再检查出口。")){editing=false;if(snapshot)render(snapshot);}}
     catch(error){notice(error.message);}
   });
   $("save-proxy-credentials").onclick=async()=>{
     const username=$("proxy-username").value,password=$("proxy-password").value;
+    if(!username&&!password)return notice("未填写新账户；已有账户保持保留，需要清除时请使用清除按钮。");
+    const remember=$("remember-proxy-credentials").checked;
     $("proxy-username").value="";$("proxy-password").value="";
-    await action("proxy-credentials",{username,password},username||password?"账户已交给本次运行的服务；输入已清空，请重新检查。":"会话账户已清除，请重新检查。");
+    await action("proxy-credentials",{username,password,remember},remember?"账户已明文保存在本机；输入已清空，请重新检查。":"账户供本次运行使用，旧保存记录已删除；请重新检查。");
+  };
+  $("clear-proxy-credentials").onclick=async()=>{
+    if(await action("clear-proxy-credentials",{},"本次运行的账户与本机保存记录已清除，请重新检查。")) {
+      $("proxy-username").value="";$("proxy-password").value="";$("remember-proxy-credentials").checked=false;
+    }
   };
   $("save-secret").onclick=async()=>{const secret=$("clash-secret").value;$("clash-secret").value="";await action("secret",{secret},"控制密钥仅在本次运行有效，请重新检查。");};
   async function refresh(){try{render(await api("snapshot"),!snapshot);}catch(e){notice(e.message);disconnected();}}
-  refresh();setInterval(()=>{if(!busy)refresh();},3000);
+  async function refreshApps(){
+    $("refresh-apps").disabled=true;
+    try{const data=await api("apps");apps=Array.isArray(data.apps)?data.apps:[];setText("apps-status",apps.length?"已发现 "+apps.length+" 个桌面应用。选择后才会启动；未找到时可在设置中手动填写路径。":"未发现支持的桌面应用；可在设置中手动填写路径。Windows 当前使用手动路径。");if(snapshot)render(snapshot);}
+    catch(e){setText("apps-status","暂时无法发现应用；已有选择保留，可重试或手动填写路径。");}
+    finally{$("refresh-apps").disabled=false;}
+  }
+  $("refresh-apps").onclick=refreshApps;
+  $("refresh").onclick=async()=>{await Promise.all([refresh(),refreshApps()]);};
+  refresh();refreshApps();setInterval(()=>{if(!busy)refresh();},3000);
 })();

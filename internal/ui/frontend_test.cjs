@@ -28,12 +28,14 @@ function element(tag="") {
   const state={config:{mode:"feilian",expectedIPs:[],programs:[],bundleIDs:[],proxyPort:17890},status:{state:"unconfigured",reason:"missing expected IP",platform:"darwin",filterActive:false},events:[]};
   const document={getElementById(id){assert.ok(elements[id],"unknown element: "+id);return elements[id]},
     createElement:element,querySelectorAll(selector){return selector.startsWith(".status-actions")?actions:[]}};
-  let offline=false,blockCheck=false,releaseCheck,pauseCalls=0,credentialBody=null,configBody=null,poll;
+  let offline=false,blockCheck=false,releaseCheck,pauseCalls=0,credentialBody=null,configBody=null,poll,discoveryCalls=0,clearCalls=0;
+  let discoveredApps=[];
   const context={document,location:{hash:"#token=unit-test"},history:{replaceState(){}},URLSearchParams,
     window:{scrollTo(){}},setInterval(callback){poll=callback},
-    async fetch(url,options){if(url==="/api/proxy-credentials")credentialBody=JSON.parse(options.body);if(url==="/api/config")configBody=JSON.parse(options.body);if(offline)throw new Error("connection refused");if(url==="/api/check"&&blockCheck)await new Promise(resolve=>releaseCheck=resolve);if(url==="/api/disarm"){pauseCalls++;state.status={...state.status,state:"stopped"}}return {ok:url!=="/api/check",async json(){return url==="/api/check"?{error:"missing expected IP"}:state}}}};
+    async fetch(url,options){if(url==="/api/apps"){discoveryCalls++;return {ok:true,async json(){return {apps:discoveredApps}}}}if(url==="/api/clear-proxy-credentials"){clearCalls++;state.status={...state.status,upstreamCredentialsSet:false,upstreamCredentialsSaved:false,upstreamCredentialsRestored:false}}if(url==="/api/proxy-credentials")credentialBody=JSON.parse(options.body);if(url==="/api/config")configBody=JSON.parse(options.body);if(offline)throw new Error("connection refused");if(url==="/api/check"&&blockCheck)await new Promise(resolve=>releaseCheck=resolve);if(url==="/api/disarm"){pauseCalls++;state.status={...state.status,state:"stopped"}}return {ok:url!=="/api/check",async json(){return url==="/api/check"?{error:"missing expected IP"}:state}}}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,"assets/app.js"),"utf8"),context);
   await new Promise(setImmediate);
+  assert.equal(discoveryCalls,1,"application discovery must run once on startup");
   const chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   const edge="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
   const claude="/Applications/Claude.app/Contents/MacOS/Claude";
@@ -45,12 +47,14 @@ function element(tag="") {
   assert.equal(browser.value,"","adding programs must require an explicit browser selection");
   assert.equal(claudePicker.value,"","adding programs must require an explicit Claude selection");
   const browserOptions=[...browser.options],claudeOptions=[...claudePicker.options];
+  const discoveryBeforePoll=discoveryCalls;
   for(let i=0;i<3;i++) {
     state.status.reason="status refresh "+i;
     poll();await new Promise(setImmediate);
     browserOptions.forEach((option,index)=>assert.equal(browser.options[index],option,"status polling must keep browser option nodes so an open native menu remains usable"));
     claudeOptions.forEach((option,index)=>assert.equal(claudePicker.options[index],option,"status polling must keep Claude option nodes"));
   }
+  assert.equal(discoveryCalls,discoveryBeforePoll,"periodic status must not rescan application directories");
   browser.value=edge;claudePicker.value=claude;
   state.config.programs=[chrome,edge,claude,"/usr/bin/changed-unrelated"];
   await elements.refresh.onclick();
@@ -69,6 +73,22 @@ function element(tag="") {
   assert.equal(claudePicker.value,"","removing the selected Claude must clear selection");
   assert.deepEqual(browser.options.map(option=>option.value),["",chrome]);
   assert.deepEqual(claudePicker.options.map(option=>option.value),[""]);
+  discoveredApps=[{kind:"browser",name:"Chrome",path:chrome,bundleID:"com.google.Chrome"},{kind:"claude",name:"Claude Desktop / Code",path:claude,bundleID:"com.anthropic.claudefordesktop"}];
+  state.config.programs=["/Users/test/.local/bin/claude"];
+  await elements["refresh-apps"].onclick();
+  assert.deepEqual(browser.options.map(option=>option.value),["",chrome],"discovered browser needs no manual program path");
+  assert.deepEqual(claudePicker.options.map(option=>option.value),["",claude],"CLI must never masquerade as Claude Desktop");
+  assert.match(claudePicker.options[1].textContent,/Claude Desktop.*Code/,"desktop choice must identify the Code tab client");
+  browser.value=chrome;claudePicker.value=claude;
+  const detectedBrowserOption=browser.options[1],detectedClaudeOption=claudePicker.options[1];
+  const discoveredCalls=discoveryCalls;
+  poll();await new Promise(setImmediate);
+  assert.equal(discoveryCalls,discoveredCalls,"status polling must preserve discovery inventory");
+  assert.equal(browser.options[1],detectedBrowserOption,"polling must keep detected option identity");
+  assert.equal(claudePicker.options[1],detectedClaudeOption);
+  assert.equal(claudePicker.value,claude,"polling must preserve explicit detected app selection");
+  await elements["refresh-apps"].onclick();
+  assert.equal(browser.options[1],detectedBrowserOption,"unchanged discovery must not rebuild dropdown");
   await elements.check.onclick();
   assert.equal(elements.check.disabled,false,"check must be usable after a failed check");
   assert.equal(elements.candidate.disabled,false,"candidate must be usable after a failed check");
@@ -112,13 +132,29 @@ function element(tag="") {
   elements["auto-recover"].checked=true;
   elements["proxy-username"].value="private-user";elements["proxy-password"].value="private-password";
   elements["config-form"].listeners.input({target:{id:"proxy-username"}});
+  state.status.credentialPersistenceSupported=true;
   state.status.state="proxy_ready";
   await elements.refresh.onclick();
   assert.equal(elements.arm.disabled,false,"entering session credentials must not leave config dirty and block activation");
   state.status.state="proxy_active";
+  elements["remember-proxy-credentials"].checked=true;
+  elements["config-form"].listeners.input({target:{id:"remember-proxy-credentials"}});
+  assert.equal(elements["save-proxy-credentials"].disabled,false,"remember choice must not dirty general config and disable its own submit");
+  poll();await new Promise(setImmediate);
+  assert.equal(elements["remember-proxy-credentials"].checked,true,"polling must preserve pending remember choice");
   await elements["save-proxy-credentials"].onclick();
-  assert.deepEqual(credentialBody,{username:"private-user",password:"private-password"},"credentials travel only via their session API");
+  assert.deepEqual(credentialBody,{username:"private-user",password:"private-password",remember:true},"credentials travel only via their session API");
   assert.equal(elements["proxy-username"].value,"");assert.equal(elements["proxy-password"].value,"");
+  state.status={...state.status,upstreamCredentialsSet:true,upstreamCredentialsSaved:true,upstreamCredentialsRestored:true};
+  await elements.refresh.onclick();
+  assert.match(elements["credentials-status"].textContent,/恢复/,"restored credentials need visible status without filling inputs");
+  credentialBody=null;
+  await elements["save-proxy-credentials"].onclick();
+  assert.equal(credentialBody,null,"blank save must not delete a restored account");
+  assert.equal(clearCalls,0);
+  await elements["clear-proxy-credentials"].onclick();
+  assert.equal(clearCalls,1,"forget must be an explicit separate action");
+  assert.equal(elements["remember-proxy-credentials"].checked,false,"successful clear must reset remembered preference");
   await elements["config-form"].listeners.submit({preventDefault(){}});
   assert.equal(configBody.proxyURL,"https://proxy.example:8443");
   assert.equal(configBody.enforcementMode,"proxy-only");
@@ -130,7 +166,7 @@ function element(tag="") {
   await elements["config-form"].listeners.submit({preventDefault(){}});
   assert.equal(configBody.autoRecover,false,"strict submissions must not retain incompatible recovery intent");
   assert.match(html,/手动检查.*候选探测.*暂停当前连接/,"manual verification side effects must be explained");
-  assert.match(html,/本次运行中已手动启动.*重开应用需重新提交账户并手动启动/,"recovery must not imply automatic startup or persisted credentials");
+  assert.match(html,/本次运行中已手动启动.*重开应用.*手动.*启动/,"recovery must not imply automatic startup or persisted credentials");
   assert.equal(JSON.stringify(configBody).includes("private-"),false,"config must never include credentials");
   assert.equal(elements["expected-ips"].value,"","candidate and credentials must not approve expected IP");
   offline=true;

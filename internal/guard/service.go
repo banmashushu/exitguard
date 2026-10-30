@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -62,7 +63,21 @@ func New(configPath string) (*Service, error) {
 		return nil, e
 	}
 	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
-	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c)}
+	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c), CredentialPersistenceSupported: credentialPersistenceSupported}
+	if credentialPersistenceSupported {
+		record, err := readCredentialRecord(configPath + ".credentials.json")
+		switch {
+		case os.IsNotExist(err):
+		case err != nil:
+			s.status.State, s.status.Reason = "blocked", errCredentialStorage.Error()
+		case c.Mode != "remote" || record.ProxyURL != c.ProxyURL:
+			s.status.Reason = "已保存账户与当前服务器不匹配，未加载；请重新保存或清除账户"
+		default:
+			s.proxyUsername, s.proxyPassword = record.Username, record.Password
+			s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsSaved, s.status.UpstreamCredentialsRestored = true, true, true
+			s.status.Reason = "已从本机恢复账户；请检查出口并手动启动代理"
+		}
+	}
 	return s, nil
 }
 func (s *Service) Config() model.Config {
@@ -131,6 +146,17 @@ func (s *Service) SaveConfig(c model.Config) error {
 		s.eventLocked(s.status.Reason)
 		return errors.New(s.status.Reason)
 	}
+	endpointChanged := c.Mode != "remote" || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL
+	if endpointChanged {
+		s.proxyUsername, s.proxyPassword = "", ""
+		s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsRestored = false, false
+		if credentialPersistenceSupported {
+			if err := removeCredentialRecord(s.configPath + ".credentials.json"); err != nil {
+				return s.credentialStorageFailureLocked()
+			}
+		}
+		s.status.UpstreamCredentialsSaved = false
+	}
 	s.status.State = "unconfigured"
 	s.status.FilterActive = false
 	s.status.PolicyHash = ""
@@ -143,19 +169,21 @@ func (s *Service) SaveConfig(c model.Config) error {
 		return e
 	}
 	s.config = c
-	if c.Mode != "remote" || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL {
-		s.proxyUsername, s.proxyPassword = "", ""
-		s.status.UpstreamCredentialsSet = false
-	}
 	s.status.EnforcementMode = c.EnforcementMode
 	s.status.ProxyAddress = proxyAddress(c)
 	s.eventLocked("配置已保存，入口已关闭")
 	return nil
 }
 
-// SetProxyCredentials retains credentials only for this process and this endpoint.
-// It never adds credentials to configuration, events, URLs or status snapshots.
+// SetProxyCredentials is the compatible session-only operation. Explicitly
+// choosing a session removes an earlier remembered pair on supported platforms.
 func (s *Service) SetProxyCredentials(username, password string) error {
+	return s.SetProxyCredentialsWithRemember(username, password, false)
+}
+
+// SetProxyCredentialsWithRemember saves only when explicitly requested, in a
+// separate endpoint-bound plaintext file. Neither variant returns credentials.
+func (s *Service) SetProxyCredentialsWithRemember(username, password string, remember bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeLocked()
@@ -163,19 +191,60 @@ func (s *Service) SetProxyCredentials(username, password string) error {
 	if s.config.Mode != "remote" && username != "" {
 		e = errors.New("仅远程代理模式接受代理凭证")
 	}
+	if username != "" && s.config.ProxyURL == "" {
+		e = errors.New("请先保存远程代理服务器，再提交账户")
+	}
 	if e != nil {
 		s.proxyUsername, s.proxyPassword = "", ""
-		s.status.UpstreamCredentialsSet = false
+		s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsRestored = false, false
 		s.status.State, s.status.Reason = "blocked", e.Error()
 		s.eventLocked("代理凭证无效，入口已关闭")
 		return e
 	}
+	s.proxyUsername, s.proxyPassword = "", ""
+	s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsRestored = false, false
+	if remember && username != "" {
+		if !credentialPersistenceSupported {
+			s.status.State, s.status.Reason = "blocked", "当前平台仅支持本次运行的账户，请取消记住后重新提交"
+			return errors.New(s.status.Reason)
+		}
+		record := credentialRecord{Version: 1, ProxyURL: s.config.ProxyURL, Username: username, Password: password}
+		if err := writeCredentialRecord(s.configPath+".credentials.json", record); err != nil {
+			return s.credentialStorageFailureLocked()
+		}
+		s.status.UpstreamCredentialsSaved = true
+	} else {
+		if credentialPersistenceSupported {
+			if err := removeCredentialRecord(s.configPath + ".credentials.json"); err != nil {
+				return s.credentialStorageFailureLocked()
+			}
+		}
+		s.status.UpstreamCredentialsSaved = false
+	}
 	s.proxyUsername, s.proxyPassword = username, password
 	s.status.UpstreamCredentialsSet = username != ""
 	s.status.State = "unconfigured"
-	s.status.Reason = "代理会话凭证已更新，需要重新验证"
+	s.status.Reason = "代理账户已更新，需要重新验证"
+	if s.status.UpstreamCredentialsSaved {
+		s.status.Reason = "账户已明文保存到本机，需要重新验证"
+	} else if username == "" {
+		s.status.Reason = "账户已清除，需要重新验证"
+	}
 	s.eventLocked(s.status.Reason)
 	return nil
+}
+
+func (s *Service) credentialStorageFailureLocked() error {
+	s.proxyUsername, s.proxyPassword = "", ""
+	s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsRestored = false, false
+	if record, err := readCredentialRecord(s.configPath + ".credentials.json"); err == nil {
+		s.status.UpstreamCredentialsSaved = s.config.Mode == "remote" && record.ProxyURL == s.config.ProxyURL
+	} else if os.IsNotExist(err) {
+		s.status.UpstreamCredentialsSaved = false
+	}
+	s.status.State, s.status.Reason = "blocked", errCredentialStorage.Error()
+	s.eventLocked(s.status.Reason)
+	return errCredentialStorage
 }
 func validateProxyCredentials(username, password string) error {
 	if (username == "") != (password == "") || len(username) > 255 || len(password) > 255 || strings.Contains(username, ":") {

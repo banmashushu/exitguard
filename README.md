@@ -1,6 +1,6 @@
 # ExitGuard · 固定出口代理
 
-ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它可以直接连接你指定的 **HTTP、HTTPS 或 SOCKS5 上游代理**，支持本次会话的账户认证，核对期望公网 IPv4，并在暂停、配置变化或出口检查失败时关闭本应用持有的连接。普通“代理转发”可在 Mac 和 Windows 独立运行，不需要安装 Claude、Network Extension 或 WFP。
+ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它可以直接连接你指定的 **HTTP、HTTPS 或 SOCKS5 上游代理**，支持账户认证（Mac 可选择本机明文保存），核对期望公网 IPv4，并在暂停、配置变化或出口检查失败时关闭本应用持有的连接。普通“代理转发”可在 Mac 和 Windows 独立运行，不需要安装 Claude、Network Extension 或 WFP。
 
 面板明确区分两种方式：
 
@@ -46,7 +46,7 @@ go run ./cmd/exitguard serve --no-open
 
 1. 打开“代理设置”，选择“代理转发”和“远程代理”。新配置默认使用这两个选项。已有配置缺少新方式字段时继续使用严格阻断，不会被自动降级。
 2. 分别填写上游的类型、服务器 IPv4 / 主机名与明确端口，点击“保存并暂停会话”。不要将账户放进服务器或 URL。
-3. 若上游需要认证，输入账户密码并点击“提交会话账户”。输入立即清空，服务只在内存中保留账户，状态只显示是否已提交。无需认证可留空；空账户和空密码一起提交会清除会话账户。
+3. 若上游需要认证，输入账户密码并点击“提交账户”。Mac 可明确勾选“记住账户和密码（明文保存在本机）”；不勾选时仅供本次运行使用。输入提交后清空，状态只显示账户是否已保存或恢复。空输入保留已有账户；需要清除时使用独立的“清除账户与保存记录”按钮。Windows 当前仅支持本次运行。
 4. 点击“测试候选 IP”。这只展示当前路径观察值，不保存为期望值，也不启动代理。向提供方确认出口与固定性后，**由你手动填写期望公网 IPv4**，再次保存。
 5. 点击“检查出口”，通过后点击“启动代理”。`proxy_active` 表示本机转发已开启，面板会明确提示系统防绕行未核验。
 6. 将支持 HTTP 代理的应用手动指向 `http://127.0.0.1:17890`，或填写可选启动路径后，明确选择 Chrome / Edge / Claude 启动入口。无需先安装或登录 Claude；未安装只影响该入口。
@@ -57,17 +57,19 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 出口检查是周期探测，存在检测时间窗口，不能证明两次检查之间上游 NAT 永不变化。请使用获准的上游与网络路径。
 
-默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。配置只保存服务器与设置，不保存账户、密码、控制密钥或启用状态。退出核心后需重新提交账户；更改出口来源或代理端点也会清除账户并关闭当前连接。独立的 Clash 控制密钥同样只在当前进程有效。
+默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。普通配置只保存服务器与设置，不包含账户密码、控制密钥或启用状态。Mac 明确勾选记住后，账户密码明文写入独立的 `config.json.credentials.json`（使用自定义配置时为 `PATH.credentials.json`），文件权限为 `0600`，只匹配当前完整代理端点。重开后自动载入账户但保持暂停，仍需检查并手动启动；未记住则需重新提交。取消记住并提交新账户、明确清除、更改出口来源或代理端点都会删除保存记录并关闭当前连接，删除失败会报告错误。状态、事件和 API 响应不会返回账户密码。独立的 Clash 控制密钥仍只在当前进程有效。
 
 ## 可选启动入口
 
-在“可选：浏览器 / Claude 启动路径”填写实际可执行文件的绝对路径，然后在概览中显式选择目标。普通代理本身不依赖此列表，也不要求目标已安装。
+Mac 会在面板启动时，以及明确点击“重新发现应用”或“刷新状态”时，检查 `/Applications` 与 `~/Applications` 中已安装的 Chrome、Edge 和 Claude Desktop。应用身份由 bundle 元数据核对；Claude Desktop 包含 Code 标签页，Claude Code CLI 和 URL Handler 不会被当作桌面端候选。发现只提供选择，不会自动启动应用或加入严格模式策略；3 秒状态轮询不扫描安装目录。未发现时可在“可选：浏览器 / Claude 启动路径”填写实际可执行文件的绝对路径；Windows 保留手动路径。普通代理本身不依赖此列表。
 
 Chrome / Edge 使用独立 `user-data-dir`、单一回环 HTTP 代理，并禁用 QUIC 和非代理 WebRTC UDP，设置 `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`。代理列表没有公网 DIRECT 回退，仅为本机控制地址保留明确例外。发起启动前核对当前方式、状态、会话版本与代理地址；暂停、重新配置或重新启用后，旧会话启动请求会被拒绝。
 
-Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。入口传入 Electron 代理参数，**当前 Claude 版本是否采用参数仍需验证**。代理模式中，未采用参数的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
+Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。入口传入 Electron 代理参数，**当前 Claude 版本及 Code 标签页子进程是否采用这些参数仍需验证**。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则；本应用不会修改 Claude 配置。代理模式中，未采用参数的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
 
 严格阻断保留更严格的启动条件：目标规范化路径必须列入当前策略，用户明确确认程序级范围，Mac 主程序及整个应用包中的 Mach-O `MH_EXECUTE` 辅助程序均需覆盖；包外链接或无法解析的 Mach-O 会拒绝启动。独立资料目录不隔离 OS 程序策略，同一程序的普通窗口也会受影响。更新可能新增辅助程序，目前没有自动覆盖机制。浏览器和 Electron 代理参数也不能证明系统代发 DNS 或非 Chromium 网络代码已被完整限制。
+
+Claude Code 的代理和桌面端范围参考：[官方网络配置](https://code.claude.com/docs/en/network-config)、[Code 桌面端说明](https://code.claude.com/docs/en/desktop)。
 
 参数依据：[Chromium 代理说明](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)、[Electron 命令行开关](https://www.electronjs.org/docs/latest/api/command-line-switches)。
 
