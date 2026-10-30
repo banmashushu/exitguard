@@ -59,8 +59,10 @@ Expose the opt-in checkbox in ordinary proxy settings with plain Chinese wording
 - [x] Implement opt-in config/status and generation-bound verified recovery with deterministic tests for the full contract above.
 - [x] Add the checkbox, recovering display and enabled Pause behavior; extend frontend action-state tests and config migration tests.
 - [x] Run covering tests, race tests, vet and existing frontend checks. Review the final failure-domain/state-machine diff.
-- [ ] Build one final Mac bundle, publish only after root closes current product instances, preserve the prior canonical bundle and verify the stable archive.
-- [ ] Root enables the user-requested option, restores session authentication, and runs bounded live acceptance. Do not intentionally disrupt the company VPN or external provider to manufacture a failure.
+- [x] Build one final Mac bundle, publish only after root closes current product instances, preserve the prior canonical bundle and verify the stable archive.
+- [x] Root enables the user-requested option, restores session authentication, and runs bounded live acceptance. Do not intentionally disrupt the company VPN or external provider to manufacture a failure.
+
+Root acceptance and limits are recorded in `docs/reviews/2026-10-30-verified-recovery-review.md`.
 
 ## Ownership and progress
 
