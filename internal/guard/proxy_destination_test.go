@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"encoding/binary"
@@ -28,6 +29,7 @@ type destinationFixture struct {
 	malformed  atomic.Bool
 	badDNS     atomic.Bool
 	stallBody  atomic.Bool
+	badOrigin  atomic.Uint32
 	authDenied atomic.Bool
 	stop       func()
 	stalled    chan struct{}
@@ -46,9 +48,57 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 	t.Helper()
 	f := &destinationFixture{stalled: make(chan struct{})}
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/echo" {
+			c, b, e := w.(http.Hijacker).Hijack()
+			if e != nil {
+				return
+			}
+			defer c.Close()
+			io.WriteString(b, "echo-ready\n")
+			b.Flush()
+			io.Copy(c, b)
+			return
+		}
+		if r.URL.Path == "/drain" {
+			io.Copy(io.Discard, r.Body)
+			fmt.Fprint(w, "drained")
+			return
+		}
 		if f.stallBody.Load() {
 			close(f.stalled)
 			<-r.Context().Done()
+			return
+		}
+		if failure := f.badOrigin.Load(); failure != 0 {
+			c, b, e := w.(http.Hijacker).Hijack()
+			if e != nil {
+				return
+			}
+			defer c.Close()
+			switch failure {
+			case 1:
+				io.WriteString(b, "NOT-HTTP private-origin-detail\r\n\r\n")
+			case 2:
+				io.WriteString(b, "HTTP/1.1 200 OK\r\nX-Truncated: private-origin-detail")
+			case 3:
+				return // Origin closes without any response.
+			case 4:
+				io.WriteString(b, "HTTP/1.1 200 OK\r\nX-Huge: "+strings.Repeat("a", 70<<10)+"\r\n\r\n")
+			case 5:
+				io.WriteString(b, strings.Repeat("HTTP/1.1 103 Early Hints\r\n\r\n", 10))
+			case 6:
+				// Leave the response head pending until this request is closed.
+			case 7:
+				io.WriteString(b, "HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\npartial")
+			case 8:
+				io.WriteString(b, "HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\npartial")
+			case 9:
+				io.WriteString(b, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\ninvalid-chunk\r\n")
+			}
+			b.Flush()
+			if failure == 6 || failure == 8 {
+				io.Copy(io.Discard, c)
+			}
 			return
 		}
 		fmt.Fprint(w, "healthy-origin")
@@ -203,6 +253,27 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 	t.Cleanup(transport.CloseIdleConnections)
 	f.client = &http.Client{Transport: transport, Timeout: time.Second}
 	return f
+}
+
+func (f *destinationFixture) echo(t *testing.T) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	c, e := net.DialTimeout("tcp4", f.s.Status().ProxyAddress, time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { c.Close() })
+	c.SetDeadline(time.Now().Add(time.Second))
+	io.WriteString(c, "CONNECT 203.0.113.70:80 HTTP/1.1\r\nHost: 203.0.113.70:80\r\n\r\n")
+	b := bufio.NewReader(c)
+	response, e := http.ReadResponse(b, &http.Request{Method: "CONNECT"})
+	if e != nil || response.StatusCode != 200 {
+		t.Fatalf("unrelated tunnel not established: %v %v", response, e)
+	}
+	io.WriteString(c, "GET /echo HTTP/1.1\r\nHost: origin.example\r\n\r\n")
+	if line, e := b.ReadString('\n'); e != nil || line != "echo-ready\n" {
+		t.Fatalf("echo origin not ready: %q %v", line, e)
+	}
+	return c, b
 }
 
 func (f *destinationFixture) healthy(t *testing.T) {

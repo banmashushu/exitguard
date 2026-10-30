@@ -283,7 +283,10 @@ func readResponseHead(reader *bufio.Reader, request *http.Request, max int) (*ht
 	var header strings.Builder
 	for {
 		line, e := reader.ReadSlice('\n')
-		if e != nil || header.Len()+len(line) > max {
+		if e != nil {
+			return nil, e
+		}
+		if header.Len()+len(line) > max {
 			return nil, errors.New("响应头无效或过大")
 		}
 		header.Write(line)

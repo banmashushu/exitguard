@@ -156,11 +156,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		}
 		var unavailable *destinationError
 		if errors.As(e, &unavailable) {
-			s.mu.Lock()
-			if s.generation == g && activeState(s.status.State) {
-				s.eventLocked(unavailable.Error() + "，仅拒绝此请求")
-			}
-			s.mu.Unlock()
+			s.noteProxyRequestFailure(req, g, unavailable.Error())
 			http.Error(w, unavailable.Error(), http.StatusBadGateway)
 			return
 		}
@@ -177,6 +173,9 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer s.untrack(upstream)
+	// DialContext has now verified the route and completed upstream TLS/auth and
+	// tunnel negotiation. Errors in the target exchange below affect only this
+	// request; route identity and health failures retain their global checks.
 	stopRequest := context.AfterFunc(req.Context(), func() { upstream.Close() })
 	defer stopRequest()
 	if req.Method == "CONNECT" {
@@ -207,10 +206,18 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 	outgoing.Close = true
 	outgoing.Header = outgoing.Header.Clone()
 	removeHopHeaders(outgoing.Header)
-	outgoing.Body = http.MaxBytesReader(w, req.Body, maxProxyBody)
-	_ = upstream.SetDeadline(time.Now().Add(60 * time.Second))
+	body := &proxyRequestBody{ReadCloser: http.MaxBytesReader(w, req.Body, maxProxyBody)}
+	outgoing.Body = body
+	if e = upstream.SetDeadline(time.Now().Add(60 * time.Second)); e != nil {
+		s.failProxyRequest(w, req, g, e, "代理请求无法设置时限")
+		return
+	}
 	if e = outgoing.Write(upstream); e != nil {
-		s.blockProxyFailure(req, g, "代理请求未完成，入口已关闭")
+		// Request.Write may hide the body read error in a private http wrapper.
+		if body.readErr != nil {
+			e = body.readErr
+		}
+		s.failProxyRequest(w, req, g, e, "代理目标请求未完成")
 		return
 	}
 	reader := bufio.NewReaderSize(upstream, 16<<10)
@@ -226,7 +233,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if e != nil {
-		s.blockProxyFailure(req, g, "代理响应无效，入口已关闭")
+		s.failProxyRequest(w, req, g, e, "代理目标响应无效")
 		return
 	}
 	defer response.Body.Close()
@@ -241,7 +248,58 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	if _, e = io.Copy(w, response.Body); e != nil {
+		_, reason := proxyExchangeFailure(e, "代理响应传输未完成")
+		s.noteProxyRequestFailure(req, g, reason)
+		// Headers may already be delivered. Abort this response so malformed or
+		// incomplete origin bodies cannot be reported as a successful transfer.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+type proxyRequestBody struct {
+	io.ReadCloser
+	readErr error
+}
+
+func (b *proxyRequestBody) Read(p []byte) (int, error) {
+	n, e := b.ReadCloser.Read(p)
+	if e != nil && e != io.EOF {
+		b.readErr = e
+	}
+	return n, e
+}
+
+func proxyExchangeFailure(e error, reason string) (int, string) {
+	var limit *http.MaxBytesError
+	if errors.As(e, &limit) {
+		return http.StatusRequestEntityTooLarge, "请求体过大"
+	}
+	var timed net.Error
+	if errors.Is(e, context.DeadlineExceeded) || errors.As(e, &timed) && timed.Timeout() {
+		return http.StatusGatewayTimeout, "代理请求超时"
+	}
+	return http.StatusBadGateway, reason
+}
+
+func (s *Service) noteProxyRequestFailure(req *http.Request, g uint64, reason string) {
+	if req.Context().Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generation == g && activeState(s.status.State) {
+		s.eventLocked(reason + "，仅拒绝此请求")
+	}
+}
+
+func (s *Service) failProxyRequest(w http.ResponseWriter, req *http.Request, g uint64, e error, reason string) {
+	if req.Context().Err() != nil {
+		return
+	}
+	status, reason := proxyExchangeFailure(e, reason)
+	s.noteProxyRequestFailure(req, g, reason)
+	http.Error(w, reason, status)
 }
 
 func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string) {
