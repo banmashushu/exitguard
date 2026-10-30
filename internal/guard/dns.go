@@ -88,7 +88,11 @@ func dnsName(b []byte, offset int) (string, int, error) {
 }
 func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 	bad := errors.New("安全 DNS 返回无效响应")
-	if len(b) < 12 || len(query) < 12 || !bytes.Equal(b[:2], query[:2]) || binary.BigEndian.Uint16(b[2:4])&0xfa0f != 0x8000 || binary.BigEndian.Uint16(b[4:6]) != 1 {
+	if len(b) < 12 || len(query) < 12 || !bytes.Equal(b[:2], query[:2]) || binary.BigEndian.Uint16(b[2:4])&0xfa00 != 0x8000 || binary.BigEndian.Uint16(b[4:6]) != 1 {
+		return nil, bad
+	}
+	rcode := binary.BigEndian.Uint16(b[2:4]) & 15
+	if rcode != 0 && rcode != 3 {
 		return nil, bad
 	}
 	qn, qend, e := dnsName(query, 12)
@@ -99,7 +103,8 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 	if e != nil || name != qn || end+4 > len(b) || qend+4 > len(query) || !bytes.Equal(b[end:end+4], query[qend:qend+4]) {
 		return nil, bad
 	}
-	count := int(binary.BigEndian.Uint16(b[6:8]))
+	answers := int(binary.BigEndian.Uint16(b[6:8]))
+	count := answers + int(binary.BigEndian.Uint16(b[8:10])) + int(binary.BigEndian.Uint16(b[10:12]))
 	if count > 256 {
 		return nil, bad
 	}
@@ -110,7 +115,7 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 		data      []byte
 		dataStart int
 	}
-	records := make([]record, 0, count)
+	records := make([]record, 0, answers)
 	for i := 0; i < count; i++ {
 		owner, pos, e := dnsName(b, offset)
 		if e != nil || pos+10 > len(b) {
@@ -121,10 +126,15 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 		length := int(binary.BigEndian.Uint16(b[pos+8 : pos+10]))
 		start := pos + 10
 		offset = start + length
-		if offset > len(b) || class != 1 {
+		if offset > len(b) || i < answers && class != 1 {
 			return nil, bad
 		}
-		records = append(records, record{owner, kind, b[start:offset], start})
+		if i < answers {
+			records = append(records, record{owner, kind, b[start:offset], start})
+		}
+	}
+	if offset != len(b) {
+		return nil, bad
 	}
 	allowed := map[string]bool{qn: true}
 	for passes := 0; passes < 16; passes++ {
@@ -167,6 +177,12 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 		}
 		ips = append(ips, ip.String())
 	}
+	if rcode == 3 {
+		if len(ips) != 0 {
+			return nil, bad
+		}
+		return nil, &destinationError{"安全 DNS 确认目标域名不存在"}
+	}
 	return ips, nil
 }
 func resolveHTTPS(ctx context.Context, host, resolver, bootstrap string, dial func(context.Context, string, string) (net.Conn, error)) ([]string, error) {
@@ -208,6 +224,10 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 	req.Header.Set("Content-Type", "application/dns-message")
 	resp, e := client.Do(req)
 	if e != nil {
+		var upstream *upstreamError
+		if errors.As(e, &upstream) {
+			return nil, upstream
+		}
 		return nil, errors.New("通过指定出口解析 DNS 失败")
 	}
 	defer resp.Body.Close()
@@ -220,7 +240,7 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 		return nil, e
 	}
 	if len(ips) == 0 {
-		return nil, errors.New("安全 DNS 未返回可用 IPv4 地址")
+		return nil, &destinationError{"安全 DNS 未返回目标的可用 IPv4 地址"}
 	}
 	return ips, nil
 }

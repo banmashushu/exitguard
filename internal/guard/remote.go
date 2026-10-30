@@ -70,7 +70,7 @@ func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, usernam
 }
 
 func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
-	fail := errors.New("SOCKS5 代理握手或认证失败")
+	fail := &upstreamError{"SOCKS5 代理握手或认证失败"}
 	method := byte(0)
 	if r.username != "" {
 		method = 2
@@ -111,7 +111,7 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 		return fail
 	}
 	var head [4]byte
-	if _, e = io.ReadFull(c, head[:]); e != nil || head[0] != 5 || head[1] != 0 || head[2] != 0 {
+	if _, e = io.ReadFull(c, head[:]); e != nil || head[0] != 5 || head[2] != 0 {
 		return fail
 	}
 	var size int
@@ -132,5 +132,23 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	if _, e = io.CopyN(io.Discard, c, int64(size+2)); e != nil {
 		return fail
 	}
-	return nil
+	// Consume and validate the entire reply before interpreting a negative REP.
+	// General/server/protocol failures remain global; REP 2..6 describe this
+	// CONNECT destination after the upstream authenticated successfully.
+	switch head[1] {
+	case 0:
+		return nil
+	case 2:
+		return &destinationError{"SOCKS5 代理规则拒绝此目标"}
+	case 3:
+		return &destinationError{"SOCKS5 目标网络不可达"}
+	case 4:
+		return &destinationError{"SOCKS5 目标主机不可达"}
+	case 5:
+		return &destinationError{"SOCKS5 目标连接被拒绝"}
+	case 6:
+		return &destinationError{"SOCKS5 目标连接 TTL 已过期"}
+	default:
+		return &upstreamError{"SOCKS5 代理返回一般故障或不支持的连接响应"}
+	}
 }

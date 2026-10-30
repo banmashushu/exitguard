@@ -146,12 +146,30 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if _, e := r.Fingerprint(req.Context()); e != nil {
-		_ = s.block(g, "出口路径变化，入口已关闭")
+		s.blockProxyFailure(req, g, "出口路径变化，入口已关闭")
 		return
 	}
 	upstream, e := r.DialContext(req.Context(), "tcp", target)
 	if e != nil {
-		_ = s.block(g, "指定出口连接失败，入口已关闭")
+		if req.Context().Err() != nil {
+			return
+		}
+		var unavailable *destinationError
+		if errors.As(e, &unavailable) {
+			s.mu.Lock()
+			if s.generation == g && activeState(s.status.State) {
+				s.eventLocked(unavailable.Error() + "，仅拒绝此请求")
+			}
+			s.mu.Unlock()
+			http.Error(w, unavailable.Error(), http.StatusBadGateway)
+			return
+		}
+		reason := "指定出口连接失败，入口已关闭"
+		var failed *upstreamError
+		if errors.As(e, &failed) {
+			reason = failed.Error() + "，入口已关闭"
+		}
+		s.blockProxyFailure(req, g, reason)
 		return
 	}
 	if !s.track(upstream, g) {
@@ -159,6 +177,8 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer s.untrack(upstream)
+	stopRequest := context.AfterFunc(req.Context(), func() { upstream.Close() })
+	defer stopRequest()
 	if req.Method == "CONNECT" {
 		down, b, e := w.(http.Hijacker).Hijack()
 		if e != nil {
@@ -190,7 +210,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 	outgoing.Body = http.MaxBytesReader(w, req.Body, maxProxyBody)
 	_ = upstream.SetDeadline(time.Now().Add(60 * time.Second))
 	if e = outgoing.Write(upstream); e != nil {
-		_ = s.block(g, "代理请求未完成，入口已关闭")
+		s.blockProxyFailure(req, g, "代理请求未完成，入口已关闭")
 		return
 	}
 	reader := bufio.NewReaderSize(upstream, 16<<10)
@@ -206,7 +226,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if e != nil {
-		_ = s.block(g, "代理响应无效，入口已关闭")
+		s.blockProxyFailure(req, g, "代理响应无效，入口已关闭")
 		return
 	}
 	defer response.Body.Close()
@@ -223,6 +243,15 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
 }
+
+func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string) {
+	// A client abandoning one request says nothing about the verified route.
+	// Upstream timeouts still block when this downstream request remains live.
+	if req.Context().Err() == nil {
+		_ = s.block(g, reason)
+	}
+}
+
 func removeHopHeaders(h http.Header) {
 	for _, key := range strings.Split(h.Get("Connection"), ",") {
 		h.Del(strings.TrimSpace(key))

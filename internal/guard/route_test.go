@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -255,5 +256,39 @@ func TestProxyDNSUsesSameUpstreamWithBootstrapLiteral(t *testing.T) {
 	}
 	if len(destinations) != 1 || destinations[0] != "1.1.1.1:443" {
 		t.Fatalf("DNS bypassed dedicated upstream %v", destinations)
+	}
+}
+
+func TestDNSNegativeReplyMustBeCompleteAndMatchQuestion(t *testing.T) {
+	query, e := dnsQuestion("missing.invalid", 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, kind := range []string{"valid-nxdomain", "wrong-id", "wrong-question", "truncated-authority", "truncated-additional", "server-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			answer := append([]byte(nil), query...)
+			binary.BigEndian.PutUint16(answer[2:4], 0x8183)
+			switch kind {
+			case "wrong-id":
+				answer[0] ^= 1
+			case "wrong-question":
+				answer[13] ^= 1
+			case "truncated-authority":
+				binary.BigEndian.PutUint16(answer[8:10], 1)
+			case "truncated-additional":
+				binary.BigEndian.PutUint16(answer[10:12], 1)
+			case "server-failure":
+				binary.BigEndian.PutUint16(answer[2:4], 0x8182)
+			}
+			_, e := dnsAnswers(answer, query, 1)
+			var unavailable *destinationError
+			if kind == "valid-nxdomain" {
+				if !errors.As(e, &unavailable) {
+					t.Fatalf("valid NXDOMAIN not target-local: %v", e)
+				}
+			} else if e == nil || errors.As(e, &unavailable) {
+				t.Fatalf("untrusted DNS response classified as target-local: %v", e)
+			}
+		})
 	}
 }

@@ -21,6 +21,18 @@ import (
 	"exitguard/internal/model"
 )
 
+// destinationError is emitted only after a validated response identifies a
+// failure of this target. It never authorizes another route or a direct dial.
+type destinationError struct{ reason string }
+
+func (e *destinationError) Error() string { return e.reason }
+
+// upstreamError contains only fixed diagnostic text, never endpoint data or
+// credentials from a raw transport error.
+type upstreamError struct{ reason string }
+
+func (e *upstreamError) Error() string { return e.reason }
+
 func newRoute(c model.Config, secret string) (route, error) {
 	if c.Mode == "feilian" {
 		return newBoundRoute(c)
@@ -112,6 +124,7 @@ func (r *upstreamRoute) DialContext(ctx context.Context, network, address string
 	if e != nil {
 		return nil, e
 	}
+	var targetFailure error
 	for _, ip := range ips {
 		c, e := r.connect(ctx, "tcp4", net.JoinHostPort(ip, port))
 		if e == nil {
@@ -120,6 +133,14 @@ func (r *upstreamRoute) DialContext(ctx context.Context, network, address string
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		var unavailable *destinationError
+		if !errors.As(e, &unavailable) {
+			return nil, e
+		}
+		targetFailure = e
+	}
+	if targetFailure != nil {
+		return nil, targetFailure
 	}
 	return nil, errors.New("指定代理出口无法连接目标，无其他出口回退")
 }
@@ -140,7 +161,7 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 	d := net.Dialer{Timeout: 8 * time.Second}
 	c, e := d.DialContext(ctx, "tcp", r.address)
 	if e != nil {
-		return nil, errors.New("指定代理上游不可达")
+		return nil, &upstreamError{"指定代理上游不可达"}
 	}
 	ok := false
 	defer func() {
@@ -159,7 +180,7 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 	if r.scheme == "https" {
 		secure := tls.Client(c, &tls.Config{ServerName: r.serverName, RootCAs: r.roots, MinVersion: tls.VersionTLS12})
 		if e = secure.HandshakeContext(ctx); e != nil {
-			return nil, errors.New("HTTPS 代理证书或 TLS 握手验证失败")
+			return nil, &upstreamError{"HTTPS 代理证书或 TLS 握手验证失败"}
 		}
 		c = secure
 	}
