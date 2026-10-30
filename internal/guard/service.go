@@ -210,6 +210,37 @@ func (s *Service) block(g uint64, reason string) error {
 	s.eventLocked(reason)
 	return errors.New(reason)
 }
+
+func (s *Service) blockProbe(g uint64, ctx context.Context, stage string, failure error, observed string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generation != g {
+		return errors.New("验证已取消，需要重新检查")
+	}
+	// closeLocked cancels the current probe, so capture its context first.
+	if e := ctx.Err(); e != nil {
+		failure, observed = e, ""
+	}
+	reason := "公网出口与期望 IP 不符，入口已关闭"
+	if failure != nil {
+		reason = stage + safeProbeError(failure).Error()
+		observed = ""
+	} else {
+		var e error
+		observed, e = validProbeIP(observed)
+		if e != nil {
+			reason = stage + safeProbeError(e).Error()
+		}
+	}
+	s.closeLocked()
+	s.status.State, s.status.Reason = "blocked", reason
+	if observed != "" {
+		s.status.ObservedIP = observed
+		s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.eventLocked(reason)
+	return errors.New(reason)
+}
 func policy(c model.Config) enforce.Policy {
 	return enforce.Policy{Port: c.ProxyPort, Programs: c.Programs, BundleIDs: c.BundleIDs}
 }
@@ -282,8 +313,14 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 		return s.block(g, "出口路径尚未验证或不支持当前配置")
 	}
 	ip, e := r.Probe(ctx, c.ProbeURL)
-	if e != nil || !expected(c, ip) {
-		return s.block(g, "公网出口检查失败或与期望 IP 不符")
+	if e == nil {
+		ip, e = validProbeIP(ip)
+	}
+	if e != nil {
+		return s.blockProbe(g, ctx, "公网出口检查失败：", e, "")
+	}
+	if !expected(c, ip) {
+		return s.blockProbe(g, ctx, "公网出口检查失败：", nil, ip)
 	}
 	after, e := r.Fingerprint(ctx)
 	if e != nil || after != before {
@@ -390,12 +427,19 @@ func (s *Service) health(ctx context.Context) {
 		return
 	}
 	ip, e := r.Probe(ctx, c.ProbeURL)
-	if e != nil || !expected(c, ip) {
-		_ = s.block(g, "公网出口变化或检查失败，入口已关闭")
+	if e == nil {
+		ip, e = validProbeIP(ip)
+	}
+	if e != nil {
+		_ = s.blockProbe(g, ctx, "公网出口检查失败：", e, "")
+		return
+	}
+	if !expected(c, ip) {
+		_ = s.blockProbe(g, ctx, "公网出口检查失败：", nil, ip)
 		return
 	}
 	s.mu.Lock()
-	if g == s.generation {
+	if g == s.generation && ctx.Err() == nil {
 		s.status.ObservedIP = ip
 		s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -433,8 +477,11 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 		return "", s.block(g, "候选出口路径不可用")
 	}
 	ip, e := r.Probe(ctx, c.ProbeURL)
+	if e == nil {
+		ip, e = validProbeIP(ip)
+	}
 	if e != nil {
-		return "", s.block(g, "候选出口探测失败")
+		return "", s.blockProbe(g, ctx, "候选出口探测失败：", e, "")
 	}
 	after, e := r.Fingerprint(ctx)
 	if e != nil || after != before {
