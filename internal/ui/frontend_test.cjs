@@ -5,24 +5,70 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function element() {
-  return {value:"",textContent:"",hidden:false,disabled:false,checked:false,
-    classList:{toggle(){}},replaceChildren(){},append(){},listeners:{},addEventListener(name,fn){this.listeners[name]=fn}};
+function element(tag="") {
+  let value="";
+  return {children:[],textContent:"",hidden:false,disabled:false,checked:false,
+    get options(){return this.children},get value(){return value},
+    set value(next){value=tag==="select"&&!this.children.some(option=>option.value===String(next))?"":String(next)},
+    classList:{toggle(){}},replaceChildren(...children){this.children=[...children];if(tag==="select")this.value=this.children[0]?.value||""},
+    append(...children){this.children.push(...children)},listeners:{},addEventListener(name,fn){this.listeners[name]=fn}};
 }
 
 (async () => {
   const html=fs.readFileSync(path.join(__dirname,"assets/index.html"),"utf8");
-  const elements=Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],element()]));
+  const elements=Object.fromEntries([...html.matchAll(/<([a-z][a-z0-9-]*)\b[^>]*\bid="([^"]+)"/g)].map(match=>[match[2],element(match[1])]));
+  for(const match of html.matchAll(/<select\b[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
+    const select=elements[match[1]];
+    for(const optionMatch of match[2].matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)) {
+      const option=element("option");option.value=optionMatch[1];option.textContent=optionMatch[2];select.append(option);
+    }
+    select.value=select.options[0]?.value||"";
+  }
   const actions=["check","candidate","arm","disarm","launch","launch-claude"].map(id=>elements[id]);
   const state={config:{mode:"feilian",expectedIPs:[],programs:[],bundleIDs:[],proxyPort:17890},status:{state:"unconfigured",reason:"missing expected IP",platform:"darwin",filterActive:false},events:[]};
   const document={getElementById(id){assert.ok(elements[id],"unknown element: "+id);return elements[id]},
     createElement:element,querySelectorAll(selector){return selector.startsWith(".status-actions")?actions:[]}};
-  let offline=false,blockCheck=false,releaseCheck,pauseCalls=0,credentialBody=null,configBody=null;
+  let offline=false,blockCheck=false,releaseCheck,pauseCalls=0,credentialBody=null,configBody=null,poll;
   const context={document,location:{hash:"#token=unit-test"},history:{replaceState(){}},URLSearchParams,
-    window:{scrollTo(){}},setInterval(){},
+    window:{scrollTo(){}},setInterval(callback){poll=callback},
     async fetch(url,options){if(url==="/api/proxy-credentials")credentialBody=JSON.parse(options.body);if(url==="/api/config")configBody=JSON.parse(options.body);if(offline)throw new Error("connection refused");if(url==="/api/check"&&blockCheck)await new Promise(resolve=>releaseCheck=resolve);if(url==="/api/disarm"){pauseCalls++;state.status={...state.status,state:"stopped"}}return {ok:url!=="/api/check",async json(){return url==="/api/check"?{error:"missing expected IP"}:state}}}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,"assets/app.js"),"utf8"),context);
   await new Promise(setImmediate);
+  const chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  const edge="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
+  const claude="/Applications/Claude.app/Contents/MacOS/Claude";
+  state.config.programs=[chrome,edge,claude,"/usr/bin/other"];
+  await elements.refresh.onclick();
+  const browser=elements["browser-path"],claudePicker=elements["claude-path"];
+  assert.deepEqual(browser.options.map(option=>option.value),["",chrome,edge]);
+  assert.deepEqual(claudePicker.options.map(option=>option.value),["",claude]);
+  assert.equal(browser.value,"","adding programs must require an explicit browser selection");
+  assert.equal(claudePicker.value,"","adding programs must require an explicit Claude selection");
+  const browserOptions=[...browser.options],claudeOptions=[...claudePicker.options];
+  for(let i=0;i<3;i++) {
+    state.status.reason="status refresh "+i;
+    poll();await new Promise(setImmediate);
+    browserOptions.forEach((option,index)=>assert.equal(browser.options[index],option,"status polling must keep browser option nodes so an open native menu remains usable"));
+    claudeOptions.forEach((option,index)=>assert.equal(claudePicker.options[index],option,"status polling must keep Claude option nodes"));
+  }
+  browser.value=edge;claudePicker.value=claude;
+  state.config.programs=[chrome,edge,claude,"/usr/bin/changed-unrelated"];
+  await elements.refresh.onclick();
+  assert.equal(browser.value,edge,"refresh must preserve the user's browser selection");
+  assert.equal(claudePicker.value,claude,"refresh must preserve the user's Claude selection");
+  browserOptions.forEach((option,index)=>assert.equal(browser.options[index],option,"irrelevant program changes must keep browser options"));
+  claudeOptions.forEach((option,index)=>assert.equal(claudePicker.options[index],option,"irrelevant program changes must keep Claude options"));
+  state.config.programs=[edge,claude];
+  await elements.refresh.onclick();
+  assert.deepEqual(browser.options.map(option=>option.value),["",edge],"actual browser changes must update its choices");
+  assert.equal(browser.value,edge,"a still-valid explicit selection must survive a choices update");
+  claudeOptions.forEach((option,index)=>assert.equal(claudePicker.options[index],option,"browser changes must not rebuild Claude options"));
+  state.config.programs=[chrome];
+  await elements.refresh.onclick();
+  assert.equal(browser.value,"","removing the selected browser must clear selection without choosing another");
+  assert.equal(claudePicker.value,"","removing the selected Claude must clear selection");
+  assert.deepEqual(browser.options.map(option=>option.value),["",chrome]);
+  assert.deepEqual(claudePicker.options.map(option=>option.value),[""]);
   await elements.check.onclick();
   assert.equal(elements.check.disabled,false,"check must be usable after a failed check");
   assert.equal(elements.candidate.disabled,false,"candidate must be usable after a failed check");

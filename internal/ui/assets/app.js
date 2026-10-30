@@ -79,19 +79,22 @@
     $("save-proxy-credentials").disabled=busy||editing||c.mode!=="remote";
     setText("diag-state",state[0]+" · "+s.state);setText("diag-filter",proxy?"本模式不核验系统防绕行":s.filterActive?"当前策略匹配":"未就绪");
     setText("diag-proxy",s.proxyAddress||"未监听");setText("diag-policy",s.policyHash||"无当前系统策略证明");setText("diag-checked",checked);
-    const priorBrowser=$("browser-path").value,priorClaude=$("claude-path").value;
-    for (const [id,label] of [["browser-path","显式选择已配置的浏览器程序"],["claude-path","显式选择已配置的 Claude 程序"]]) {
-      $(id).replaceChildren();const empty=document.createElement("option");empty.value="";empty.textContent=label;$(id).append(empty);
-    }
-    let hasClaude=false;
+    const browserPaths=[],claudePaths=[];
     for (const path of c.programs||[]) {
-      const base=path.split(/[\\/]/).pop();let target;
-      if (/^(chrome\.exe|msedge\.exe|Google Chrome|Microsoft Edge)$/i.test(base)) target=$("browser-path");
-      else if (/^(Claude|Claude\.exe)$/i.test(base)) {target=$("claude-path");hasClaude=true;}
-      if (target) {const option=document.createElement("option");option.value=path;option.textContent=path;target.append(option);}
+      const base=path.split(/[\\/]/).pop();
+      if (/^(chrome\.exe|msedge\.exe|Google Chrome|Microsoft Edge)$/i.test(base)) browserPaths.push(path);
+      else if (/^(Claude|Claude\.exe)$/i.test(base)) claudePaths.push(path);
     }
-    $("browser-path").value=priorBrowser;$("claude-path").value=priorClaude;
-    setText("claude-badge",hasClaude?"已配置 · 待实测":"可选 · 尚未配置");
+    for (const [id,label,paths] of [["browser-path","显式选择已配置的浏览器程序",browserPaths],["claude-path","显式选择已配置的 Claude 程序",claudePaths]]) {
+      const target=$(id);
+      // Replacing options closes the native macOS menu during status polling.
+      if (target.options.length===paths.length+1&&target.options[0].value===""&&target.options[0].textContent===label&&paths.every((path,index)=>target.options[index+1].value===path)) continue;
+      const prior=target.value;
+      target.replaceChildren();const empty=document.createElement("option");empty.value="";empty.textContent=label;target.append(empty);
+      for (const path of paths) {const option=document.createElement("option");option.value=path;option.textContent=path;target.append(option);}
+      target.value=paths.includes(prior)?prior:"";
+    }
+    setText("claude-badge",claudePaths.length?"已配置 · 待实测":"可选 · 尚未配置");
     const eventRoot=$("event-list");eventRoot.replaceChildren();eventRoot.className="";
     if (!data.events?.length) {eventRoot.className="events-empty";eventRoot.textContent="本次运行暂无事件";}
     for (const e of [...(data.events||[])].reverse()) {
