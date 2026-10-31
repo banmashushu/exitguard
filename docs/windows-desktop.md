@@ -2,7 +2,7 @@
 
 主程序来自 `cmd/exitguard-desktop`，使用 MyGo 的 `WindowOptions.Content` 原生控件。旧 `cmd/exitguard` 仍是单独的 CLI，不能把它的子命令传给桌面主程序。普通固定出口代理与受控浏览器启动不证明系统级防绕行；Windows 实机验收仍待完成。
 
-Windows v0.2.1 修复安装向导选项和品牌图标。Mac 已发布应用和压缩包保持 v0.2.0，本次不重建或替换。
+v0.2.1 统一发布 Mac 与 Windows 原生版，Windows 同时修复安装向导选项和品牌图标。公开下载包括 Mac arm64 DMG/ZIP、Windows x64 Setup/ZIP 和统一 SHA-256 校验文件。
 
 ## 构建
 

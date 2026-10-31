@@ -6,7 +6,9 @@
 
 构建固定使用 Go 1.27.3 与 MyGo v0.7.3：Mac 运行 `sh scripts/package-macos-desktop.sh`；Windows 运行 `sh scripts/package-windows-desktop.sh`，另需 NSIS 3.13。工具路径与 Windows 便携包、安装器说明见 [Windows 原生桌面交付](docs/windows-desktop.md)，Mac 使用说明见 [原生桌面说明](platform/macos/README-native.txt)。
 
-Windows 当前交付版本为 v0.2.1；已发布的 Mac 应用保持 v0.2.0。普通代理只处理明确经过它的流量，系统级防绕行与真实 Windows 运行验收仍需单独完成。
+当前发布版本统一为 v0.2.1，提供 Mac arm64 DMG/ZIP、Windows x64 安装包/便携包及 SHA-256 校验文件。Mac 使用 ad-hoc 签名且未经 Apple 公证，Windows 未签名。普通代理只处理明确经过它的流量，系统级防绕行与真实 Windows 运行验收仍需单独完成。
+
+Release 从干净的 `main` 提交构建；设置 `EXITGUARD_RELEASE_COMMIT` 为该提交完整 SHA 后，运行 `sh scripts/package-release.sh`，产物在 `.work/release-v0.2.1/`。脚本不上传、不安装或启动应用，详细流程见 [Release 构建说明](docs/release.md)。
 
 ## 工作方式与边界
 

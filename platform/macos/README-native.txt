@@ -1,8 +1,13 @@
-ExitGuard 0.2.0 · Mac 原生桌面版
+ExitGuard 0.2.1 · Mac 原生桌面版
 ==============================
 
 适用于 Apple 芯片 Mac，macOS 13 或更新版本。
 界面使用 MyGo 原生 Go 控件，代理核心与界面在同一进程运行。
+
+安装方式
+--------
+打开 DMG，将 ExitGuard 拖到 Applications；也可解压 ZIP 后复制 ExitGuard.app。
+替换应用前请退出旧版；现有代理和账号仍保存在原用户配置目录。
 
 首次使用
 --------

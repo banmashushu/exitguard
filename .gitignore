@@ -6,3 +6,4 @@
 *.credentials.json
 *.profiles.json
 .exitguard-account-*
+/cmd/exitguard-desktop/mygo_windows_*.syso
