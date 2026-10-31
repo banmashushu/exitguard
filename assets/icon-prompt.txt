@@ -1,0 +1,12 @@
+ExitGuard app icon — prompt summary
+
+Tool: imagegen. Original generated PNG copied unchanged to assets/app-icon.png.
+
+Deep teal dimensional rounded-square base, ivory white shield/door with an
+outward exit arrow, restrained mint accents, transparent corners, no text.
+
+Source PNG SHA-256:
+d13cc79a77475a8285e0c513954161b1bd4ed64f51dd55c82f8e13c94b29030c
+
+The original is 1254 x 1254 RGBA. MyGo v0.7.3's official pngToICNS flow
+decodes it and emits the standard macOS sizes; no manual image edits are used.

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.exitguard.app</string>
+<key>CFBundleExecutable</key><string>ExitGuard</string>
+<key>CFBundleName</key><string>ExitGuard</string>
+<key>CFBundleDisplayName</key><string>ExitGuard · 出口守护</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSSystemExtensionUsageDescription</key><string>ExitGuard 网络过滤仅允许明确选择的程序连接本机守护代理，并阻止其其他网络路径。无法确定来源的出站连接也会被拒绝，可能影响其他应用。请确认公司设备策略并安排实际验证后授权。</string>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict></plist>

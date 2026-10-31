@@ -1,0 +1,26 @@
+Sandboxie core default-template data
+
+Copyright 2004-2020 Sandboxie Holdings, LLC
+Copyright 2020-2026 David Xanatos (xanasoft.com) and Sandboxie contributors.
+
+Source project: https://github.com/sandboxie-plus/Sandboxie
+Source tag: v1.18.8 (core version 5.73.8)
+Source data: https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/Sandboxie/install/Templates.ini
+Source data Git blob: aa2453a0eef7fa9b4ae797479dfe7c6c1e1c953a
+Source license: https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/Sandboxie/COPYING
+
+The file sandboxie-defaults-5.73.8.json reproduces the 15 effective setting
+names and 100 values selected by the stock [DefaultTemplates] list. ExitGuard
+converted that subset to JSON, removed template headings/comments/metadata,
+and uses it as an exact-match compatibility baseline. The actual setting
+strings were not modified. The modified data source is included in this
+package; the repository copy is internal/nativeapp/data/.
+
+Sandboxie core source/data are licensed under GNU GPL version 3 (source
+headers permit version 3 or later). The applicable full license is provided
+in GPL-3.0.txt. The data and this preview are provided without warranty.
+
+No Sandboxie driver, DLL, service, installer, SandMan UI, support certificate,
+or other vendor binary is included. The separately installed official
+Sandboxie Plus runtime has its own applicable licensing terms. ExitGuard
+uses its exported documented API and Start.exe entry point at runtime.

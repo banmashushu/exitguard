@@ -1,0 +1,35 @@
+name: Native build and tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  go:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: node internal/ui/frontend_test.cjs
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        run: go build -trimpath -o dist/ExitGuard-windows-amd64.exe ./cmd/exitguard
+      - name: Build ordinary local Mac app
+        if: runner.os == 'macOS'
+        run: sh scripts/build-local.sh
+      - name: Compile unsigned filter sources and policy tests
+        if: runner.os == 'macOS'
+        run: sh platform/macos/filter-build.sh dist/native-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ExitGuard-${{ runner.os }}
+          path: dist/
+          if-no-files-found: error
