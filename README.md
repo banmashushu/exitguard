@@ -1,6 +1,16 @@
 # ExitGuard · 固定出口代理
 
-ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它可以直接连接你指定的 **HTTP、HTTPS 或 SOCKS5 上游代理**，支持账户认证（Mac 可选择本机明文保存），核对期望公网 IPv4，并在暂停、配置变化或出口检查失败时关闭本应用持有的连接。普通“代理转发”可在 Mac 和 Windows 独立运行，不需要安装 Claude、Network Extension 或 WFP。
+## 当前原生桌面版
+
+桌面入口为 `cmd/exitguard-desktop`，使用 MyGo 原生 Go 控件，不使用 WebView。Mac 与 Windows 均支持最多保存 32 份远程代理及各自的账户。保存或选择代理不会自动切换或启动连接；点击“使用此代理”后，仍需检查出口并手动启动。账户以受本机文件权限限制的明文保存，请勿分享配置目录中的凭据或代理列表文件。
+
+构建固定使用 Go 1.27.3 与 MyGo v0.7.3：Mac 运行 `sh scripts/package-macos-desktop.sh`；Windows 运行 `sh scripts/package-windows-desktop.sh`，另需 NSIS 3.13。工具路径与 Windows 便携包、安装器说明见 [Windows 原生桌面交付](docs/windows-desktop.md)，Mac 使用说明见 [原生桌面说明](platform/macos/README-native.txt)。
+
+Windows 当前交付版本为 v0.2.1；已发布的 Mac 应用保持 v0.2.0。普通代理只处理明确经过它的流量，系统级防绕行与真实 Windows 运行验收仍需单独完成。
+
+## 工作方式与边界
+
+ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它可以直接连接你指定的 **HTTP、HTTPS 或 SOCKS5 上游代理**，支持账户认证，核对期望公网 IPv4，并在暂停、配置变化或出口检查失败时关闭本应用持有的连接。普通“代理转发”可在 Mac 和 Windows 独立运行，不需要安装 Claude、Network Extension 或 WFP。
 
 面板明确区分两种方式：
 
@@ -17,24 +27,25 @@ ExitGuard 本身是一个仅监听 `127.0.0.1` 的 HTTP / CONNECT 代理。它�
 
 Windows 的 Chrome / Edge / Claude 另有 **原生沙箱预览**：`sh scripts/package-windows-native.sh` 生成 `dist/ExitGuard-Windows-Native-Preview.zip`。它使用单独安装的官方 Sandboxie Plus v1.18.8，在现有桌面上仅通过产品箱启动应用；不使用虚拟机或整机分流。运行时有效策略与四个 WFP 回调均需实际核对，DNS broker 和三款应用仍待 Windows 验收，状态始终为 `preview-incomplete`。普通快捷方式和已有窗口不自动归组。详见 [原生预览说明](docs/windows-native-preview.md)。
 
-## 构建与启动
+## 构建原生桌面版
 
-需要 Go 1.23 或更新版本。Mac 图形应用需要 macOS 13+、Apple 命令行开发工具和 Swift 编译器，无第三方运行时。
+使用固定版本 Go 1.27.3 与 MyGo v0.7.3。Mac 目标为 Apple 芯片、macOS 13+；Windows 目标为 Windows 10 / 11 x64，安装器另需 NSIS 3.13。界面不依赖 WebView2 或浏览器运行时。脚本默认使用项目内的预检工具；其他机器可设置 `EXITGUARD_GO`、`EXITGUARD_MYGO`，Windows 另可设置 `EXITGUARD_MAKENSIS` 与 `NSISDIR`。
 
 ```sh
 sh scripts/build-local.sh
-open dist/ExitGuard.app
 ```
 
-Mac 使用 WKWebView 和应用包内的 Go 核心，不另开普通浏览器。ad-hoc 签名足以运行普通代理；构建不安装系统扩展，也不改变办公网络。
+此命令准备 Mac 原生应用与压缩包到 `.work/macos-native-release/`，不会安装、启动应用或替换已发布的 `dist` 产物。默认应用路径为 `.work/macos-native-release/ExitGuard.app`；本地 ad-hoc 签名构建未经过 Apple 公证，不安装系统扩展，也不改变办公网络。
 
 ```sh
-sh scripts/build-windows.sh
+sh scripts/package-windows-desktop.sh
 ```
 
-得到 `dist/ExitGuard-windows-amd64.exe`，复制到 Windows 后运行并保留核心进程。本机控制面板与代理共用 `127.0.0.1:17890`。交叉编译成功不等于 Windows 网络或系统过滤已经实测。
+得到 `dist/ExitGuard-Windows-x64.zip`、`dist/ExitGuard-Windows-x64-Setup.exe` 与 SHA-256 校验文件。便携版完整解压后运行 `ExitGuard.exe`；安装器按当前用户安装，提供桌面快捷方式与完成后启动选项。交叉编译和静态包检查不能代替真实 Windows 运行验收，详见 [Windows 原生桌面交付](docs/windows-desktop.md)。
 
-不使用图形外壳时：
+## 可选 CLI / Web 面板
+
+旧 `cmd/exitguard` 保留为独立 CLI 与 Web 面板入口；桌面主程序不接受这些子命令。原生桌面版的界面与代理核心在同一进程，回环端口仅处理代理流量，不提供 HTTP 控制面板。需要旧 Web 面板时单独运行：
 
 ```sh
 go run ./cmd/exitguard serve --no-open
@@ -42,14 +53,17 @@ go run ./cmd/exitguard serve --no-open
 
 `serve`（别名 `server`）只在独占监听后输出一次 ready JSON。URL fragment 含本次运行的控制凭证，**不要转发或公开此输出**。页面读取后移除地址栏凭证，仅保存在页面会话中；完整刷新页面或重启核心后需重新打开应用。未启用会话时，只允许经鉴权的控制请求，代理拒绝转发。
 
-## 第一次使用：直接连接远程代理
+Windows CLI 可用 `sh scripts/build-windows.sh` 单独构建为 `dist/ExitGuard-windows-amd64.exe`。它与桌面版是不同入口，不包含在当前原生 GUI 发行包内；同一代理监听端口不能同时被两个实例占用。
 
-1. 打开“代理设置”，选择“代理转发”和“远程代理”。新配置默认使用这两个选项。已有配置缺少新方式字段时继续使用严格阻断，不会被自动降级。
-2. 分别填写上游的类型、服务器 IPv4 / 主机名与明确端口，点击“保存并暂停会话”。不要将账户放进服务器或 URL。
-3. 若上游需要认证，输入账户密码并点击“提交账户”。Mac 可明确勾选“记住账户和密码（明文保存在本机）”；不勾选时仅供本次运行使用。输入提交后清空，状态只显示账户是否已保存或恢复。空输入保留已有账户；需要清除时使用独立的“清除账户与保存记录”按钮。Windows 当前仅支持本次运行。
-4. 点击“测试候选 IP”。这只展示当前路径观察值，不保存为期望值，也不启动代理。向提供方确认出口与固定性后，**由你手动填写期望公网 IPv4**，再次保存。
-5. 点击“检查出口”，通过后点击“启动代理”。`proxy_active` 表示本机转发已开启，面板会明确提示系统防绕行未核验。
-6. 将支持 HTTP 代理的应用手动指向 `http://127.0.0.1:17890`，或填写可选启动路径后，明确选择 Chrome / Edge / Claude 启动入口。无需先安装或登录 Claude；未安装只影响该入口。
+## 第一次使用原生桌面版：直接连接远程代理
+
+1. 打开“代理设置”，点击“新建”，填写便于区分的代理名称。
+2. 分栏填写协议、服务器 IPv4 / 主机名、明确端口、代理用户名、代理密码和期望出口 IP，点击一次“保存代理”。无需认证可将账户留空；新账户需同时填写用户名和密码，不要把账户放进服务器栏或 URL。
+3. 每份代理独立保存并记住自己的账户，最多 32 份。保存或选择列表条目只进入编辑，不会切换或启动连接。编辑已有代理时，账户两栏都留空会保留原账户；密码不会回填。更换服务器需替换或明确勾选清除旧账户后保存。
+4. 点击“使用此代理”，再到“出口概览”检查出口，通过后手动启动代理。概览也可选择已保存代理并点击“使用所选代理”；切换后保持关闭，需要重新检查和手动启动。同一时间仅使用一份代理。
+5. 期望 IP 暂不确定时可先留空：保存并使用代理后，到概览测试候选 IP。候选值只用于展示，不自动保存或启动；向提供方核对出口与固定性后，**手动填写期望公网 IPv4** 并保存。
+6. 保存当前使用的代理会暂停连接；删除需确认，删除当前代理也会关闭连接，不会自动切换到其他代理。重开应用恢复当前代理及其已保存账户，仍需检查并手动启动。
+7. 将支持 HTTP 代理的应用手动指向界面显示的回环地址（默认 `http://127.0.0.1:17890`），或在“可选启动入口”明确选择 Chrome / Edge / Claude。无需先安装或登录 Claude；未安装只影响该入口。`proxy_active` 只表示本机转发已开启，不证明系统防绕行。
 
 HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观察者可能读到账户认证；目标 HTTPS 的内容加密仍然保留。HTTPS 上游会先建立并正常验证 TLS，再认证，不支持忽略证书或自动降级。
 
@@ -57,11 +71,11 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 出口检查是周期探测，存在检测时间窗口，不能证明两次检查之间上游 NAT 永不变化。请使用获准的上游与网络路径。
 
-默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。普通配置只保存服务器与设置，不包含账户密码、控制密钥或启用状态。Mac 明确勾选记住后，账户密码明文写入独立的 `config.json.credentials.json`（使用自定义配置时为 `PATH.credentials.json`），文件权限为 `0600`，只匹配当前完整代理端点。重开后自动载入账户但保持暂停，仍需检查并手动启动；未记住则需重新提交。取消记住并提交新账户、明确清除、更改出口来源或代理端点都会删除保存记录并关闭当前连接，删除失败会报告错误。状态、事件和 API 响应不会返回账户密码。独立的 Clash 控制密钥仍只在当前进程有效。
+默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。普通配置不包含账户密码、控制密钥或启用状态；原生桌面版将代理列表及各自账户写入独立的 `config.json.profiles.json`（自定义配置对应 `PATH.profiles.json`）。Mac 使用 `0600` 文件权限，Windows 使用受限文件 ACL；这些是本机明文文件，不是加密保险箱，请勿分享。首次打开会导入原有远程代理及匹配的旧 `config.json.credentials.json` 账户记录，迁移或读取失败会报告错误并保持关闭。状态、事件和 API 响应不会返回账户密码。独立的 Clash 控制密钥仍只在当前进程有效。
 
 ## 可选启动入口
 
-Mac 会在面板启动时，以及明确点击“重新发现应用”或“刷新状态”时，检查 `/Applications` 与 `~/Applications` 中已安装的 Chrome、Edge 和 Claude Desktop。应用身份由 bundle 元数据核对；Claude Desktop 包含 Code 标签页，Claude Code CLI 和 URL Handler 不会被当作桌面端候选。发现只提供选择，不会自动启动应用或加入严格模式策略；3 秒状态轮询不扫描安装目录。未发现时可在“可选：浏览器 / Claude 启动路径”填写实际可执行文件的绝对路径；Windows 保留手动路径。普通代理本身不依赖此列表。
+原生桌面版在启动时与明确点击“重新发现应用”时查找 Chrome、Edge 和 Claude Desktop；刷新状态不重新扫描。Mac 检查 `/Applications` 与 `~/Applications` 的应用包元数据；Windows 读取限定的 App Paths 注册项、已知安装目录与当前用户 Claude MSIX 清单。不会搜索任意用户文件、读取客户端账户或自动启动程序。Claude Code CLI 和 URL Handler 不会被当作桌面端候选；Windows MSIX 候选仍需实机验证。未发现时可填写实际可执行文件的完整路径。发现只提供选择，不会加入严格模式策略，普通代理本身不依赖此列表。
 
 Chrome / Edge 使用独立 `user-data-dir`、单一回环 HTTP 代理，并禁用 QUIC 和非代理 WebRTC UDP，设置 `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`。代理列表没有公网 DIRECT 回退，仅为本机控制地址保留明确例外。发起启动前核对当前方式、状态、会话版本与代理地址；暂停、重新配置或重新启用后，旧会话启动请求会被拒绝。
 

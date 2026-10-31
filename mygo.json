@@ -1,0 +1,12 @@
+{
+  "name": "ExitGuard",
+  "slug": "exitguard",
+  "identifier": "com.exitguard.app",
+  "version": "0.2.1",
+  "icon": "assets/app-icon.png",
+  "main": "./cmd/exitguard-desktop",
+  "out": "dist/mygo",
+  "macos": {
+    "minimumSystemVersion": "13.0"
+  }
+}

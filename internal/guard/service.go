@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type Service struct {
 	secret          string
 	proxyUsername   string
 	proxyPassword   string
+	profileError    error
 	events          []model.Event
 	generation      uint64
 	connections     map[net.Conn]struct{}
@@ -64,7 +66,9 @@ func New(configPath string) (*Service, error) {
 	}
 	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
 	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c), CredentialPersistenceSupported: credentialPersistenceSupported}
-	if credentialPersistenceSupported {
+	if c.RemoteProfileID != "" {
+		s.initializeProfiles()
+	} else if credentialPersistenceSupported {
 		record, err := readCredentialRecord(configPath + ".credentials.json")
 		switch {
 		case os.IsNotExist(err):
@@ -76,6 +80,14 @@ func New(configPath string) (*Service, error) {
 			s.proxyUsername, s.proxyPassword = record.Username, record.Password
 			s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsSaved, s.status.UpstreamCredentialsRestored = true, true, true
 			s.status.Reason = "已从本机恢复账户；请检查出口并手动启动代理"
+		}
+	}
+	if c.RemoteProfileID == "" && c.Mode == "remote" && c.ProxyURL != "" && credentialPersistenceSupported {
+		// A preexisting library may be the durable half of an interrupted
+		// migration. Preserve legacy sources for Ensure to reconcile, but never
+		// allow a hidden legacy route to be started in the meantime.
+		if _, err := readProfileLibrary(configPath + ".profiles.json"); !os.IsNotExist(err) {
+			s.profileBlockedLocked(errProfileSelectionRequired)
 		}
 	}
 	return s, nil
@@ -140,6 +152,19 @@ func (s *Service) SaveConfig(c model.Config) error {
 	defer s.mu.Unlock()
 	old := s.config
 	s.closeLocked()
+	if old.RemoteProfileID != "" {
+		if c.RemoteProfileID == "" {
+			c.RemoteProfileID = old.RemoteProfileID
+		}
+		if c.RemoteProfileID != old.RemoteProfileID || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL || !slices.Equal(c.ExpectedIPs, old.ExpectedIPs) {
+			return s.profileInputFailureLocked(errors.New("当前代理的服务器和出口请在代理配置中编辑；切换来源前请先取消使用当前代理"))
+		}
+		if s.profileError != nil {
+			return s.profileFailureLocked()
+		}
+	} else if c.RemoteProfileID != "" {
+		return s.profileInputFailureLocked(errors.New("请通过保存的代理列表选择当前代理"))
+	}
 	if s.running && c.ProxyPort != s.config.ProxyPort {
 		s.status.State = "blocked"
 		s.status.Reason = "运行中不能更改守护端口，请先停止服务再修改配置"
@@ -187,6 +212,9 @@ func (s *Service) SetProxyCredentialsWithRemember(username, password string, rem
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeLocked()
+	if s.config.RemoteProfileID != "" {
+		return s.profileInputFailureLocked(errors.New("当前代理的账户请在代理配置中更新"))
+	}
 	e := validateProxyCredentials(username, password)
 	if s.config.Mode != "remote" && username != "" {
 		e = errors.New("仅远程代理模式接受代理凭证")
@@ -350,6 +378,17 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	s.mu.Lock()
+	// A native action may have been queued before a manual Pause. Check
+	// cancellation while holding the same lock as Disarm, before any mutation.
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.profileError != nil {
+		err := s.profileBlockedLocked(s.profileError)
+		s.mu.Unlock()
+		return err
+	}
 	s.closeLocked()
 	g := s.generation
 	s.cancelCheck = cancel
@@ -539,6 +578,15 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	if s.profileError != nil {
+		err := s.profileBlockedLocked(s.profileError)
+		s.mu.Unlock()
+		return "", err
+	}
 	s.closeLocked()
 	g, c, secret := s.generation, copyConfig(s.config), s.secret
 	username, password := s.proxyUsername, s.proxyPassword

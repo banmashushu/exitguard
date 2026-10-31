@@ -24,8 +24,8 @@ func credentialService(t *testing.T) *Service {
 }
 func requireCredentialPersistence(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS != "darwin" {
-		t.Skip("private plaintext store supported on macOS")
+	if !credentialPersistenceSupported {
+		t.Skip("private plaintext store unsupported")
 	}
 }
 func rememberCredentials(t *testing.T, s *Service, username, password string, remember bool) error {
@@ -46,7 +46,7 @@ func TestRememberedCredentialsRestoreClosedAndNeverEnterSnapshots(t *testing.T) 
 	}
 	path := s.configPath + ".credentials.json"
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil || (runtime.GOOS == "darwin" && info.Mode().Perm() != 0600) {
 		t.Fatalf("private saved record missing: %v", err)
 	}
 	b, err := os.ReadFile(path)
@@ -131,7 +131,7 @@ func TestEndpointChangeForgetsSavedPairAndMismatchCannotRestore(t *testing.T) {
 	if s.Status().UpstreamCredentialsSet {
 		t.Fatal("endpoint change retained memory credentials")
 	}
-	if err = os.WriteFile(s.configPath+".credentials.json", saved, 0600); err != nil {
+	if err = writeCredentialFile(s.configPath+".credentials.json", saved); err != nil {
 		t.Fatal(err)
 	}
 	again, err := New(s.configPath)
@@ -151,7 +151,7 @@ func TestCredentialStorageFailuresRemainClosedAndCanBeReplaced(t *testing.T) {
 		t.Run(raw[:8], func(t *testing.T) {
 			s := credentialService(t)
 			path := s.configPath + ".credentials.json"
-			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			if err := writeCredentialFile(path, []byte(raw)); err != nil {
 				t.Fatal(err)
 			}
 			again, err := New(s.configPath)
@@ -193,6 +193,9 @@ func TestCredentialStorageFailuresRemainClosedAndCanBeReplaced(t *testing.T) {
 }
 func TestCredentialSymlinksAndLoosePermissionsAreRejected(t *testing.T) {
 	requireCredentialPersistence(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("POSIX permission and symlink fixtures; Windows has DACL/reparse tests")
+	}
 	s := credentialService(t)
 	path := s.configPath + ".credentials.json"
 	outside := filepath.Join(t.TempDir(), "outside")
@@ -241,8 +244,8 @@ func TestCredentialSymlinksAndLoosePermissionsAreRejected(t *testing.T) {
 	}
 }
 func TestUnsupportedPlatformsKeepSessionCredentialsUsable(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("non-mac behavior")
+	if credentialPersistenceSupported {
+		t.Skip("supported persistence platform")
 	}
 	s := credentialService(t)
 	if err := s.SetProxyCredentials("fixture-user", "fixture-password"); err != nil {
@@ -253,6 +256,39 @@ func TestUnsupportedPlatformsKeepSessionCredentialsUsable(t *testing.T) {
 	}
 	if err := rememberCredentials(t, s, "fixture-user", "fixture-password", true); err == nil {
 		t.Fatal("unsupported private persistence claimed")
+	}
+}
+
+func TestCredentialRecordRequiresEveryFieldAndRejectsNull(t *testing.T) {
+	requireCredentialPersistence(t)
+	for _, raw := range []string{
+		`{"version":1,"proxyURL":"https://proxy.example:8443","username":"fixture-user"}`,
+		`{"version":1,"proxyURL":"https://proxy.example:8443","username":"fixture-user","password":null}`,
+	} {
+		t.Run(raw[len(raw)-12:], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "account.json")
+			if err := writeCredentialRecord(path, credentialRecord{Version: 1, ProxyURL: "https://proxy.example:8443", Username: "fixture-user", Password: "fixture-password"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeCredentialFile(path, []byte(raw)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readCredentialRecord(path); err == nil {
+				t.Fatal("incomplete or null account field accepted")
+			}
+		})
+	}
+}
+
+func TestCredentialWriteBoundsRecordBeforeCreatingFile(t *testing.T) {
+	requireCredentialPersistence(t)
+	path := filepath.Join(t.TempDir(), "account.json")
+	err := writeCredentialRecord(path, credentialRecord{Version: 1, ProxyURL: "https://proxy.example:8443", Username: strings.Repeat("x", maxCredentialRecord), Password: "fixture-password"})
+	if err == nil {
+		t.Fatal("oversized account record saved")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("oversized record created an account file")
 	}
 }
 
@@ -288,7 +324,7 @@ func TestCredentialRecordRejectsDuplicateEndpointAndAccountFields(t *testing.T) 
 		t.Run(duplicate[:10], func(t *testing.T) {
 			s := credentialService(t)
 			raw := `{` + duplicate + `"version":1,"proxyURL":"https://proxy.example:8443","username":"fixture-user","password":"fixture-password"}`
-			if err := os.WriteFile(s.configPath+".credentials.json", []byte(raw), 0600); err != nil {
+			if err := writeCredentialFile(s.configPath+".credentials.json", []byte(raw)); err != nil {
 				t.Fatal(err)
 			}
 			again, err := New(s.configPath)

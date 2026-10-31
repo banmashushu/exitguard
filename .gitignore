@@ -4,4 +4,5 @@
 *.test
 .DS_Store
 *.credentials.json
+*.profiles.json
 .exitguard-account-*

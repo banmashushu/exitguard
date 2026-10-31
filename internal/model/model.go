@@ -7,6 +7,7 @@ type Config struct {
 	AutoRecover        bool     `json:"autoRecover"`
 	ExpectedIPs        []string `json:"expectedIPs"`
 	ProxyURL           string   `json:"proxyURL"`
+	RemoteProfileID    string   `json:"remoteProfileID,omitempty"`
 	ClashControllerURL string   `json:"clashControllerURL"`
 	ClashSelector      string   `json:"clashSelector"`
 	ClashNode          string   `json:"clashNode"`
@@ -17,6 +18,28 @@ type Config struct {
 	ProxyPort          uint16   `json:"proxyPort"`
 	Programs           []string `json:"programs"`
 	BundleIDs          []string `json:"bundleIDs"`
+}
+
+// RemoteProfile is a public summary. Account names and passwords remain in the
+// private profile library and are never included in UI snapshots.
+type RemoteProfile struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	ProxyURL       string   `json:"proxyURL"`
+	ExpectedIPs    []string `json:"expectedIPs"`
+	HasCredentials bool     `json:"hasCredentials"`
+}
+
+// RemoteProfileInput uses keep, replace or clear to make account changes
+// explicit. A blank ID creates a new profile; only selection activates one.
+type RemoteProfileInput struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	ProxyURL         string   `json:"proxyURL"`
+	ExpectedIPs      []string `json:"expectedIPs"`
+	CredentialAction string   `json:"credentialAction"`
+	Username         string   `json:"-"`
+	Password         string   `json:"-"`
 }
 
 type Status struct {

@@ -336,26 +336,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		if !h.decode(w, r, &body) {
 			return
 		}
-		current := h.service.Status()
-		config := h.service.Config()
-		if (body.SessionRevision != nil && *body.SessionRevision != current.SessionRevision) || (enforcementMode(config.EnforcementMode) == "proxy-only" && body.SessionRevision == nil) {
-			h.fail(w, 409, "会话已变化，请刷新状态后重新选择启动入口")
-			return
-		}
-		if !launchReady(config, current) {
-			h.fail(w, 409, "当前会话尚未启用或模式不匹配，禁止启动入口")
-			return
-		}
-		var err error
-		switch body.Kind {
-		case "browser":
-			err = launchBrowser(h.service, body)
-		case "claude":
-			err = launchClaude(h.service, body)
-		default:
-			err = errors.New("不支持此类程序启动")
-		}
-		if err != nil {
+		if err := LaunchApplication(h.service, body); err != nil {
 			h.fail(w, 409, err.Error())
 			return
 		}
