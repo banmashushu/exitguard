@@ -27,6 +27,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.runContext = ctx
 	c := s.config
 	s.mu.Unlock()
+	defer s.diagnostics.marker("process_stop")
 	listener, e := net.Listen("tcp4", proxyAddress(c))
 	if e != nil {
 		s.mu.Lock()
@@ -147,6 +148,9 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "目标地址无效", 400)
 		return
 	}
+	// Only connection setup is traced. Successful tunnels and target-local
+	// refusals are discarded; no tunneled traffic is inspected or persisted.
+	req = req.WithContext(s.startProbeTrace(req.Context(), diagnosticForward, g, 0, ""))
 	if _, e := r.Fingerprint(req.Context()); e != nil {
 		s.blockProxyFailure(req, g, "出口路径变化，入口已关闭", nil)
 		return
@@ -182,6 +186,7 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "出口验证已失效", 503)
 		return
 	}
+	traceFrom(req.Context()).freeze(nil)
 	defer s.untrack(upstream)
 	// DialContext has now verified the route and completed upstream TLS/auth and
 	// tunnel negotiation. Errors in the target exchange below affect only this
@@ -316,12 +321,28 @@ func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string, 
 	// A client abandoning one request says nothing about the verified route.
 	// Upstream timeouts still block when this downstream request remains live.
 	if req.Context().Err() == nil {
+		s.mu.Lock()
+		current := s.generation == g && activeState(s.status.State)
+		s.mu.Unlock()
+		if !current {
+			return
+		}
+		failure := cause
+		if failure == nil {
+			failure = errRecoveryPath
+		}
+		reason += probeTraceSuffix(req.Context(), failure)
+		defer s.finishProbeTrace(req.Context(), failure)
+		origin := ""
+		if trace := traceFrom(req.Context()); trace != nil {
+			origin = trace.freeze(failure).CheckID
+		}
 		var classified *forwardError
 		var upstream *upstreamError
 		knownTransient := errors.As(cause, &classified) && classified.transient() || errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达"
 		if knownTransient {
 			s.mu.Lock()
-			recovering := s.beginRecoveryLocked(g, reason)
+			recovering := s.beginRecoveryLocked(g, reason, origin)
 			s.mu.Unlock()
 			if recovering {
 				return

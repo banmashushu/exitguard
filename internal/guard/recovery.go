@@ -22,6 +22,8 @@ type recoverySnapshot struct {
 	secret, username, password  string
 	fingerprint, lastVerifiedIP string
 	wait                        func(context.Context, time.Duration) error
+	originCheckID               string
+	attempt                     int
 }
 
 func waitRecovery(ctx context.Context, delay time.Duration) error {
@@ -51,7 +53,7 @@ func transientRecoveryFailure(e error) bool {
 
 // Caller holds mu. Only an explicitly armed, currently active ordinary proxy
 // may retain recovery intent across revocation of the old route and sockets.
-func (s *Service) beginRecoveryLocked(g uint64, reason string) bool {
+func (s *Service) beginRecoveryLocked(g uint64, reason string, origin ...string) bool {
 	if g != s.generation || !activeState(s.status.State) || !s.armedIntent || !s.config.AutoRecover || s.config.EnforcementMode != "proxy-only" || s.cancelRecovery != nil || s.runContext == nil || s.runContext.Err() != nil || !s.running || s.listener == nil || s.boundPort != s.config.ProxyPort {
 		return false
 	}
@@ -60,6 +62,9 @@ func (s *Service) beginRecoveryLocked(g uint64, reason string) bool {
 		return false
 	}
 	snapshot := recoverySnapshot{config: copyConfig(s.config), secret: s.secret, username: s.proxyUsername, password: s.proxyPassword, fingerprint: s.fingerprint, lastVerifiedIP: ip, wait: s.recoveryWait}
+	if len(origin) != 0 {
+		snapshot.originCheckID = origin[0]
+	}
 	s.closeLocked()
 	snapshot.generation = s.generation
 	s.armedIntent = true
@@ -109,6 +114,8 @@ func (s *Service) recoverRoute(ctx context.Context, cancel context.CancelFunc, s
 		s.status.Reason = fmt.Sprintf("转发已暂停，正在第 %d/%d 次核验原出口", attempt+1, len(recoveryDelays))
 		s.mu.Unlock()
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 15*time.Second)
+		snapshot.attempt = attempt + 1
+		attemptCtx = s.startProbeTrace(attemptCtx, diagnosticRecovery, snapshot.generation, snapshot.attempt, snapshot.originCheckID)
 		candidate, ip, e := s.recoveryCandidate(attemptCtx, snapshot)
 		attemptCancel()
 		if e != nil {
@@ -124,6 +131,7 @@ func (s *Service) recoverRoute(ctx context.Context, cancel context.CancelFunc, s
 			} else if transientRecoveryFailure(e) {
 				reason = "自动重试已用尽（3 次），入口保持关闭：" + safeProbeError(e).Error()
 			}
+			reason += probeTraceSuffix(attemptCtx, e)
 			s.finishRecoveryBlocked(snapshot, reason, ip)
 			return
 		}
@@ -146,6 +154,10 @@ func (s *Service) recoverRoute(ctx context.Context, cancel context.CancelFunc, s
 }
 
 func (s *Service) recoveryCandidate(ctx context.Context, snapshot recoverySnapshot) (candidate route, observed string, failure error) {
+	if traceFrom(ctx) == nil {
+		ctx = s.startProbeTrace(ctx, diagnosticRecovery, snapshot.generation, snapshot.attempt, snapshot.originCheckID)
+	}
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	r, e := s.routeFor(ctx, snapshot.config, snapshot.secret, snapshot.username, snapshot.password)
 	if e != nil {
 		return nil, "", safeProbeError(e)

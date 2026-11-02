@@ -57,6 +57,8 @@ type Service struct {
 	cancelRecovery  context.CancelFunc
 	recoveryWait    func(context.Context, time.Duration) error
 	recoverySlot    chan struct{}
+	diagnostics     *probeLogger
+	lastHealthStart time.Time
 }
 
 func New(configPath string) (*Service, error) {
@@ -65,6 +67,8 @@ func New(configPath string) (*Service, error) {
 		return nil, e
 	}
 	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
+	s.diagnostics = newProbeLogger(configPath)
+	s.diagnostics.marker("process_start")
 	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c), CredentialPersistenceSupported: credentialPersistenceSupported}
 	if c.RemoteProfileID != "" {
 		s.initializeProfiles()
@@ -332,11 +336,17 @@ func (s *Service) blockProbe(g uint64, ctx context.Context, stage string, failur
 	reason := "公网出口与期望 IP 不符，入口已关闭"
 	if failure != nil {
 		reason = stage + safeProbeError(failure).Error()
+		reason += probeTraceSuffix(ctx, failure)
 		observed = ""
-		if transientRecoveryFailure(failure) && s.beginRecoveryLocked(g, reason) {
+		origin := ""
+		if trace := traceFrom(ctx); trace != nil {
+			origin = trace.freeze(failure).CheckID
+		}
+		if transientRecoveryFailure(failure) && s.beginRecoveryLocked(g, reason, origin) {
 			return errors.New(reason)
 		}
 	} else {
+		reason += probeTraceSuffix(ctx, errProbeMismatch)
 		var e error
 		observed, e = validProbeIP(observed)
 		if e != nil {
@@ -370,7 +380,7 @@ func expected(c model.Config, raw string) bool {
 }
 func (s *Service) Check(ctx context.Context) error { return s.validate(ctx, false) }
 func (s *Service) Arm(ctx context.Context) error   { return s.validate(ctx, true) }
-func (s *Service) validate(ctx context.Context, arm bool) error {
+func (s *Service) validate(ctx context.Context, arm bool) (failure error) {
 	if !s.checkMu.TryLock() {
 		return errors.New("已有验证任务正在运行，请等待或暂停")
 	}
@@ -401,6 +411,12 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	s.status.ObservedIP = ""
 	s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
+	op := diagnosticCheck
+	if arm {
+		op = diagnosticArm
+	}
+	ctx = s.startProbeTrace(ctx, op, g, 0, "")
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if arm {
 		s.mu.Lock()
 		owned := s.running && s.listener != nil && s.boundPort == c.ProxyPort
@@ -537,15 +553,20 @@ func (s *Service) health(ctx context.Context) {
 	}
 	s.cancelHealth = cancel
 	s.mu.Unlock()
+	ctx = s.startProbeTrace(ctx, diagnosticHealth, g, 0, "")
+	var failure error
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if c.EnforcementMode == "required" {
 		p, e := s.inspect(ctx, policy(c))
 		if e != nil || !p.Active || p.PolicyHash != enforce.Hash(policy(c)) {
+			failure = errors.New("policy changed")
 			_ = s.block(g, "系统过滤状态变化，入口已关闭")
 			return
 		}
 	}
 	next, e := r.Fingerprint(ctx)
 	if e != nil || fp != next {
+		failure = errRecoveryPath
 		_ = s.block(g, "出口路径变化，入口已关闭")
 		return
 	}
@@ -554,10 +575,12 @@ func (s *Service) health(ctx context.Context) {
 		ip, e = validProbeIP(ip)
 	}
 	if e != nil {
+		failure = e
 		_ = s.blockProbe(g, ctx, "公网出口检查失败：", e, "")
 		return
 	}
 	if !expected(c, ip) {
+		failure = errProbeMismatch
 		_ = s.blockProbe(g, ctx, "公网出口检查失败：", nil, ip)
 		return
 	}
@@ -570,7 +593,7 @@ func (s *Service) health(ctx context.Context) {
 }
 
 // ProbeCandidate discovers only this process's route. It never authorizes application traffic.
-func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
+func (s *Service) ProbeCandidate(ctx context.Context) (observed string, failure error) {
 	if !s.checkMu.TryLock() {
 		return "", errors.New("已有验证任务正在运行，请等待或暂停")
 	}
@@ -596,6 +619,8 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 	s.status.ObservedIP = ""
 	s.status.Reason = "正在探测守护进程的候选出口"
 	s.mu.Unlock()
+	ctx = s.startProbeTrace(ctx, diagnosticCandidate, g, 0, "")
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if e := validateConfig(c, false); e != nil {
 		return "", s.block(g, e.Error())
 	}

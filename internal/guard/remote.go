@@ -43,7 +43,9 @@ func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, usernam
 		defer cancel()
 		// Only the proxy server itself is resolved with system DNS. All target
 		// names use the configured DoH service through this pinned upstream.
+		lookupDone := beginProbeStage(ctx, diagnosticProxyLookup)
 		ips, err := lookup(lookupCtx, "ip4", host)
+		lookupDone(err)
 		if err != nil {
 			return nil, errors.New("无法解析远程代理服务器的 IPv4 地址")
 		}
@@ -69,7 +71,9 @@ func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, usernam
 	return &upstreamRoute{address: net.JoinHostPort(ip.String(), u.Port()), scheme: u.Scheme, serverName: host, username: username, password: password, roots: deps.roots, resolver: c.DNSResolverURL, bootstrap: c.DNSBootstrapIP, ctx: session, cancel: cancel}, nil
 }
 
-func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
+func (r *upstreamRoute) socksConnect(ctx context.Context, c net.Conn, address string) (failure error) {
+	done := beginProbeStage(ctx, diagnosticSOCKSNegotiation)
+	defer func() { done(failure) }()
 	fail := &upstreamError{"SOCKS5 代理握手或认证失败"}
 	method := byte(0)
 	if r.username != "" {
@@ -85,7 +89,9 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	if response[0] != 5 || response[1] != method {
 		return fail
 	}
+	done(nil)
 	if method == 2 {
+		done = beginProbeStage(ctx, diagnosticSOCKSAuth)
 		auth := []byte{1, byte(len(r.username))}
 		auth = append(auth, r.username...)
 		auth = append(auth, byte(len(r.password)))
@@ -99,7 +105,9 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 		if response[0] != 1 || response[1] != 0 {
 			return fail
 		}
+		done(nil)
 	}
+	done = beginProbeStage(ctx, diagnosticSOCKSConnect)
 	host, port, e := targetAddress(address)
 	if e != nil {
 		return fail

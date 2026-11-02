@@ -79,6 +79,10 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。普通配置不包含账户密码、控制密钥或启用状态；原生桌面版将代理列表及各自账户写入独立的 `config.json.profiles.json`（自定义配置对应 `PATH.profiles.json`）。Mac 使用 `0600` 文件权限，Windows 使用受限文件 ACL；这些是本机明文文件，不是加密保险箱，请勿分享。首次打开会导入原有远程代理及匹配的旧 `config.json.credentials.json` 账户记录，迁移或读取失败会报告错误并保持关闭。状态、事件和 API 响应不会返回账户密码。独立的 Clash 控制密钥仍只在当前进程有效。
 
+本地连接诊断保存在配置旁的 `config.json.diagnostics.jsonl`（自定义配置为 `PATH.diagnostics.jsonl`），单文件最多 1 MiB，另保留一份最多 1 MiB 的 `.1` 备份，重启不会清空上次记录。每次手动检查、候选出口探测和自动恢复都会记录结果；健康检查的失败全部记录，普通成功最多每 30 秒记录一次。普通转发仅记录会关闭整个入口的连接建立故障，成功请求和仅影响一个目标的拒绝不写入此日志。日志还包含进程启动/服务停止标记、检查编号、操作、会话版本、恢复来源编号与重试次数、开始时间、累计用时/剩余检查预算、已有连接数，以及代理 TCP/TLS、SOCKS 协商/认证/CONNECT、HTTP CONNECT、安全 DNS TLS/HTTP/读取、出口探测 TLS/HTTP/读取的阶段耗时和固定分类。`scope` 区分 `dns` 与 `target`；`health_gap_ms` 为相邻健康检查开始时间的间隔，可帮助区分检查执行间隔与网络耗时。失败事件中的 `check`、`stage` 和 `elapsed` 可定位对应记录。
+
+诊断不记录请求地址、域名、IP、查询参数、账户、原始错误或响应内容，也不读取隧道内流量。每次检查最多 64 个阶段；完成后的记录冻结，晚到回调不会修改旧记录。Mac 日志为 `0600`，Windows 复用账户文件的受限 ACL 写入；符号链接和非普通文件目标会被拒绝。日志使用独立锁和有大小限制的私有文件替换，写入失败不会改变转发许可或恢复策略；异常退出可能缺少停止标记。服务停止时封存日志，停止后才完成的取消检查会被丢弃，因此停止标记之后不会再追加旧进程的检查记录。诊断不会调整现有超时、重试、DNS 或代理设置。分享排障资料时只需提供故障前后的诊断记录，无需提供账户文件。
+
 ## 可选启动入口
 
 原生桌面版在启动时与明确点击“重新发现应用”时查找 Chrome、Edge 和 Claude Desktop；刷新状态不重新扫描。Mac 检查 `/Applications` 与 `~/Applications` 的应用包元数据；Windows 读取限定的 App Paths 注册项、已知安装目录与当前用户 Claude MSIX 清单。不会搜索任意用户文件、读取客户端账户或自动启动程序。Claude Code CLI 和 URL Handler 不会被当作桌面端候选；Windows MSIX 候选仍需实机验证。未发现时可填写实际可执行文件的完整路径。发现只提供选择，不会加入严格模式策略，普通代理本身不依赖此列表。

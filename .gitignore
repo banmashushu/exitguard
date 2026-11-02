@@ -6,4 +6,8 @@
 *.credentials.json
 *.profiles.json
 .exitguard-account-*
+*.diagnostics.jsonl
+*.diagnostics.jsonl.1
+.exitguard-diagnostics-*
 /cmd/exitguard-desktop/mygo_windows_*.syso
+/.idea/

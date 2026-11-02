@@ -144,7 +144,7 @@ func (r *upstreamRoute) DialContext(ctx context.Context, network, address string
 	}
 	return nil, errors.New("指定代理出口无法连接目标，无其他出口回退")
 }
-func (r *upstreamRoute) connect(ctx context.Context, network, address string) (net.Conn, error) {
+func (r *upstreamRoute) connect(ctx context.Context, network, address string) (connection net.Conn, failure error) {
 	if network != "tcp" && network != "tcp4" && network != "tcp6" {
 		return nil, errors.New("仅支持 TCP")
 	}
@@ -159,7 +159,9 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 		return nil, errors.New("代理会话已关闭")
 	}
 	d := net.Dialer{Timeout: 8 * time.Second}
+	tcpDone := beginProbeStage(ctx, diagnosticProxyTCP)
 	c, e := d.DialContext(ctx, "tcp", r.address)
+	tcpDone(e)
 	if e != nil {
 		return nil, &upstreamError{"指定代理上游不可达"}
 	}
@@ -179,7 +181,10 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 	_ = c.SetDeadline(deadline)
 	if r.scheme == "https" {
 		secure := tls.Client(c, &tls.Config{ServerName: r.serverName, RootCAs: r.roots, MinVersion: tls.VersionTLS12})
-		if e = secure.HandshakeContext(ctx); e != nil {
+		tlsDone := beginProbeStage(ctx, diagnosticProxyTLS)
+		e = secure.HandshakeContext(ctx)
+		tlsDone(e)
+		if e != nil {
 			if failure := transportFailure(stageProxyTLS, e, false); failure.transient() {
 				return nil, failure
 			}
@@ -195,10 +200,12 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 	}()
 	var reader *bufio.Reader
 	if r.scheme == "socks5" {
-		if e = r.socksConnect(c, address); e != nil {
+		if e = r.socksConnect(ctx, c, address); e != nil {
 			return nil, e
 		}
 	} else {
+		connectDone := beginProbeStage(ctx, diagnosticHTTPConnect)
+		defer func() { connectDone(failure) }()
 		var auth string
 		if r.username != "" {
 			auth = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(r.username+":"+r.password)) + "\r\n"

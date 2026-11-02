@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 )
 
 type probeFailure uint8
@@ -172,7 +173,20 @@ func probeIP(ctx context.Context, r interface {
 		return "", &probeError{kind: probeInvalidAddress}
 	}
 	req.Header.Set("Accept", "application/json, text/plain")
-	resp, e := routeClient(r).Do(req)
+	var ready atomic.Bool
+	ctx, tracing := traceProbeHTTP(ctx, false, &ready)
+	req = req.WithContext(ctx)
+	client := routeClient(r)
+	transport := client.Transport.(*http.Transport)
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		c, e := r.DialContext(ctx, network, address)
+		if e == nil {
+			ready.Store(true)
+		}
+		return c, e
+	}
+	resp, e := client.Do(req)
+	tracing.headersDone(e)
 	if e != nil {
 		return "", safeProbeError(e)
 	}
@@ -180,7 +194,9 @@ func probeIP(ctx context.Context, r interface {
 	if resp.StatusCode != 200 {
 		return "", &probeError{kind: probeHTTPStatus, status: resp.StatusCode}
 	}
+	readDone := beginProbeStage(ctx, diagnosticTargetRead)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4097))
+	readDone(e)
 	if e != nil {
 		if cause := safeProbeError(e); cause.kind == probeTimeout || cause.kind == probeCancelled || cause.kind == probeNetworkFailure {
 			return "", cause

@@ -93,7 +93,9 @@ func (r *boundRoute) dialLiteral(ctx context.Context, network, address string) (
 		}
 		return bindError
 	}}
+	tcpDone := beginProbeStage(ctx, diagnosticTargetTCP)
 	c, e := d.DialContext(ctx, family, address)
+	tcpDone(e)
 	if e != nil {
 		return nil, e
 	}

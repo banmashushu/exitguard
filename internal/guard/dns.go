@@ -202,6 +202,7 @@ func resolveHTTPS(ctx context.Context, host, resolver, bootstrap string, dial fu
 	return resolveHTTPSWithRoots(ctx, host, resolver, bootstrap, dial, nil)
 }
 func resolveHTTPSWithRoots(ctx context.Context, host, resolver, bootstrap string, dial func(context.Context, string, string) (net.Conn, error), roots *x509.CertPool) ([]string, error) {
+	ctx = context.WithValue(ctx, probeScopeKey{}, true)
 	u, e := url.Parse(resolver)
 	if e != nil || secureURL(resolver) != nil {
 		return nil, errors.New("安全 DNS 地址无效")
@@ -240,8 +241,13 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 	var connected atomic.Bool
+	var ready atomic.Bool
+	ready.Store(true)
+	traceCtx, tracing := traceProbeHTTP(req.Context(), true, &ready)
+	req = req.WithContext(traceCtx)
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}))
 	resp, e := client.Do(req)
+	tracing.headersDone(e)
 	established := connected.Load()
 	if e != nil {
 		var upstream *upstreamError
@@ -268,7 +274,9 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 	if mimeErr != nil || contentType != "application/dns-message" {
 		return nil, &forwardError{stage: stageDNS, cause: causeInvalidResponse}
 	}
+	readDone := beginProbeStage(traceCtx, diagnosticDNSRead)
 	data, e := io.ReadAll(io.LimitReader(resp.Body, 64<<10+1))
+	readDone(e)
 	if len(data) > 64<<10 {
 		return nil, &forwardError{stage: stageDNS, cause: causeInvalidResponse}
 	}
