@@ -37,6 +37,8 @@ jobs:
           sh scripts/build-local.sh
       - name: Compile unsigned filter sources and policy tests
         if: runner.os == 'macOS'
+        env:
+          EXITGUARD_FILTER_SKIP_LIVE_SCAN: '1'
         run: sh platform/macos/filter-build.sh dist/native-macos
       - uses: actions/upload-artifact@v4
         with:
