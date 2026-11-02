@@ -162,10 +162,18 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, unavailable.Error(), http.StatusBadGateway)
 			return
 		}
+		var classified *forwardError
+		if errors.As(e, &classified) && classified.requestLocal() {
+			s.noteProxyRequestFailure(req, g, classified.Error())
+			http.Error(w, classified.Error(), classified.httpStatus())
+			return
+		}
 		reason := "指定出口连接失败，入口已关闭"
 		var failed *upstreamError
 		if errors.As(e, &failed) {
 			reason = failed.Error() + "，入口已关闭"
+		} else if classified != nil {
+			reason = classified.Error() + "，入口已关闭"
 		}
 		s.blockProxyFailure(req, g, reason, e)
 		return
@@ -308,8 +316,10 @@ func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string, 
 	// A client abandoning one request says nothing about the verified route.
 	// Upstream timeouts still block when this downstream request remains live.
 	if req.Context().Err() == nil {
+		var classified *forwardError
 		var upstream *upstreamError
-		if errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达" {
+		knownTransient := errors.As(cause, &classified) && classified.transient() || errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达"
+		if knownTransient {
 			s.mu.Lock()
 			recovering := s.beginRecoveryLocked(g, reason)
 			s.mu.Unlock()

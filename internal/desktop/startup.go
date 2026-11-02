@@ -2,7 +2,7 @@ package desktop
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"time"
 
 	"exitguard/internal/model"
@@ -28,7 +28,9 @@ func startDesktopService(ctx context.Context, core profileStartupCore) (*Service
 	}
 	if err != nil {
 		runtime.Close(3 * time.Second)
-		return nil, nil, errors.New("无法初始化已保存代理；连接保持关闭，请检查本机代理配置文件后重新打开应用")
+		// Profile errors are fixed, credential-free messages; show which one
+		// occurred so storage faults and selection conflicts are distinguishable.
+		return nil, nil, fmt.Errorf("无法初始化已保存代理（%s）；连接保持关闭，请检查本机代理配置文件后重新打开应用", err)
 	}
 	return runtime, profiles, nil
 }

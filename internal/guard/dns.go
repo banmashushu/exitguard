@@ -8,11 +8,15 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
+	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -156,6 +160,7 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 		}
 	}
 	var ips []string
+	relatedAnswers, rejectedAddress := 0, false
 	for _, rr := range records {
 		if rr.kind != qtype || !allowed[rr.name] {
 			continue
@@ -172,16 +177,24 @@ func dnsAnswers(b, query []byte, qtype uint16) ([]string, error) {
 		} else {
 			return nil, bad
 		}
+		relatedAnswers++
 		if !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.Is4In6() || ip.IsLinkLocalUnicast() {
-			return nil, bad
+			rejectedAddress = true
+			continue
 		}
 		ips = append(ips, ip.String())
 	}
 	if rcode == 3 {
-		if len(ips) != 0 {
+		if relatedAnswers != 0 {
 			return nil, bad
 		}
 		return nil, &destinationError{"安全 DNS 确认目标域名不存在"}
+	}
+	if rejectedAddress {
+		// A valid reply naming a disallowed address is a target-policy refusal,
+		// not evidence of a damaged DNS channel. Reject mixed answers as a whole,
+		// only after every related record has been validated above.
+		return nil, &destinationError{"安全 DNS 目标地址不在允许转发范围"}
 	}
 	return ips, nil
 }
@@ -207,7 +220,11 @@ func resolveHTTPSWithRoots(ctx context.Context, host, resolver, bootstrap string
 		if !strings.EqualFold(address, wanted) {
 			return nil, errors.New("安全 DNS 不允许其他连接")
 		}
-		return dial(ctx, "tcp", endpoint)
+		connection, err := dial(ctx, "tcp", endpoint)
+		if err != nil {
+			return nil, dnsDialFailure(err)
+		}
+		return connection, nil
 	}, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 4 * time.Second, DisableKeepAlives: true, ForceAttemptHTTP2: false, MaxResponseHeaderBytes: 16 << 10}}
 	return queryIPv4(ctx, host, resolver, client)
 }
@@ -222,22 +239,51 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 	}
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}))
 	resp, e := client.Do(req)
+	established := connected.Load()
 	if e != nil {
 		var upstream *upstreamError
 		if errors.As(e, &upstream) {
 			return nil, upstream
 		}
-		return nil, errors.New("通过指定出口解析 DNS 失败")
+		var known *forwardError
+		if errors.As(e, &known) {
+			return nil, known
+		}
+		var destination *destinationError
+		if errors.As(e, &destination) {
+			return nil, destination
+		}
+		failure := transportFailure(stageDNS, e, established)
+		failure.local = established
+		return nil, failure
 	}
 	defer resp.Body.Close()
-	data, e := readBounded(resp.Body, 64<<10)
-	if e != nil || resp.StatusCode != 200 || !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "application/dns-message") {
-		return nil, errors.New("安全 DNS 响应不兼容")
+	if resp.StatusCode != http.StatusOK {
+		return nil, &forwardError{stage: stageDNS, cause: causeHTTPStatus, status: resp.StatusCode, local: established}
+	}
+	contentType, _, mimeErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mimeErr != nil || contentType != "application/dns-message" {
+		return nil, &forwardError{stage: stageDNS, cause: causeInvalidResponse}
+	}
+	data, e := io.ReadAll(io.LimitReader(resp.Body, 64<<10+1))
+	if len(data) > 64<<10 {
+		return nil, &forwardError{stage: stageDNS, cause: causeInvalidResponse}
+	}
+	if e != nil {
+		failure := transportFailure(stageDNS, e, true)
+		failure.local = established
+		return nil, failure
 	}
 	ips, e := dnsAnswers(data, q, 1)
 	if e != nil {
-		return nil, e
+		var unavailable *destinationError
+		if errors.As(e, &unavailable) {
+			return nil, unavailable
+		}
+		return nil, &forwardError{stage: stageDNS, cause: causeInvalidResponse}
 	}
 	if len(ips) == 0 {
 		return nil, &destinationError{"安全 DNS 未返回目标的可用 IPv4 地址"}

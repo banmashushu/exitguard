@@ -576,6 +576,9 @@ func proxyOnlyFixture(t *testing.T) (model.Config, model.Status) {
 }
 
 func TestProxyOnlyBrowserAndClaudeLaunchWithoutOSCoverage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS launch fixture requires POSIX executable permission bits; Mach-O parser has separate portable coverage")
+	}
 	c, s := proxyOnlyFixture(t)
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	for _, target := range []struct{ kind, name string }{{"browser", "Google Chrome"}, {"claude", "Claude"}} {

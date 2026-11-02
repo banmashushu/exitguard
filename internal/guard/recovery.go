@@ -38,6 +38,8 @@ func waitRecovery(ctx context.Context, delay time.Duration) error {
 func transientRecoveryFailure(e error) bool {
 	failure := safeProbeError(e)
 	switch failure.kind {
+	case probeForwardFailure:
+		return failure.forward != nil && failure.forward.transient()
 	case probeTimeout, probeNetworkFailure, probeBodyRead, probeUpstreamUnavailable:
 		return true
 	case probeHTTPStatus:

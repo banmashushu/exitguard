@@ -76,10 +76,13 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 		method = 2
 	}
 	if _, e := c.Write([]byte{5, 1, method}); e != nil {
-		return fail
+		return transportFailure(stageSOCKSHandshake, e, false)
 	}
 	var response [2]byte
-	if _, e := io.ReadFull(c, response[:]); e != nil || response[0] != 5 || response[1] != method {
+	if e := readSOCKSFrame(c, response[:]); e != nil {
+		return e
+	}
+	if response[0] != 5 || response[1] != method {
 		return fail
 	}
 	if method == 2 {
@@ -88,9 +91,12 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 		auth = append(auth, byte(len(r.password)))
 		auth = append(auth, r.password...)
 		if _, e := c.Write(auth); e != nil {
-			return fail
+			return transportFailure(stageSOCKSHandshake, e, false)
 		}
-		if _, e := io.ReadFull(c, response[:]); e != nil || response[0] != 1 || response[1] != 0 {
+		if e := readSOCKSFrame(c, response[:]); e != nil {
+			return e
+		}
+		if response[0] != 1 || response[1] != 0 {
 			return fail
 		}
 	}
@@ -108,10 +114,13 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	request = append(request, a[:]...)
 	request = binary.BigEndian.AppendUint16(request, uint16(n))
 	if _, e = c.Write(request); e != nil {
-		return fail
+		return transportFailure(stageSOCKSHandshake, e, false)
 	}
 	var head [4]byte
-	if _, e = io.ReadFull(c, head[:]); e != nil || head[0] != 5 || head[2] != 0 {
+	if e := readSOCKSFrame(c, head[:]); e != nil {
+		return e
+	}
+	if head[0] != 5 || head[2] != 0 {
 		return fail
 	}
 	var size int
@@ -151,4 +160,16 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	default:
 		return &upstreamError{"SOCKS5 代理返回一般故障或不支持的连接响应"}
 	}
+}
+
+func readSOCKSFrame(c io.Reader, frame []byte) error {
+	n, err := io.ReadFull(c, frame)
+	if err == nil {
+		return nil
+	}
+	if n == 0 {
+		return transportFailure(stageSOCKSHandshake, err, false)
+	}
+	// A partial protocol frame is not a validated response or a mere idle close.
+	return &upstreamError{"SOCKS5 代理握手或认证失败"}
 }

@@ -34,17 +34,24 @@ const (
 	probeUnknownFailure
 	probeUnknownReadFailure
 	probeTLSProtocolFailure
+	probeForwardFailure
 )
 
 // A probeError contains only an enumerated cause and an HTTP status number.
 // Raw URLs, response bodies, credentials, and transport errors are not retained.
 type probeError struct {
-	kind   probeFailure
-	status int
+	kind    probeFailure
+	status  int
+	forward *forwardError
 }
 
 func (e *probeError) Error() string {
 	switch e.kind {
+	case probeForwardFailure:
+		if e.forward != nil {
+			return e.forward.Error()
+		}
+		return "公网探测网络请求失败"
 	case probeTimeout:
 		return "公网探测超时"
 	case probeCancelled:
@@ -84,6 +91,10 @@ func safeProbeError(e error) *probeError {
 	var known *probeError
 	if errors.As(e, &known) {
 		return known
+	}
+	var forward *forwardError
+	if errors.As(e, &forward) {
+		return &probeError{kind: probeForwardFailure, forward: forward}
 	}
 	var timed net.Error
 	if errors.Is(e, context.DeadlineExceeded) || errors.As(e, &timed) && timed.Timeout() {

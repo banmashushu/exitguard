@@ -73,6 +73,10 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 出口检查是周期探测，存在检测时间窗口，不能证明两次检查之间上游 NAT 永不变化。请使用获准的上游与网络路径。
 
+已完成代理隧道与安全 DNS 的 TLS 验证后，单次 DNS 请求超时、传输中断或 DNS 服务返回 HTTP 429 / 5xx 只会拒绝该请求，保留其他连接。上游连接或握手发生可识别的瞬时故障时，会暂停转发；若开启“自动恢复”，按 2、5、15 秒间隔最多重新核验三次，只有原线路与原公网 IP 均一致才恢复。公网出口健康检查中的 DNS 故障仍需暂停并核验。认证拒绝、证书或协议错误、无效 DNS 响应、出口变化和未识别错误保持关闭，需手动检查。诊断与事件显示故障发生在 DNS、代理握手或 TLS 等阶段，不记录原始请求、账户或响应内容。
+
+完整、匹配的 DNS 返回若指向不允许转发的地址（例如 QQ 本机快速登录域名返回 `127.0.0.1`），只拒绝该目标请求，其他连接继续运行。混合包含公网和禁止地址时也拒绝整个目标；不会因这一兼容处理开放本机地址访问。格式损坏、问题不匹配或矛盾的 DNS 返回仍保持阻断。
+
 默认配置位置：macOS `~/Library/Application Support/ExitGuard/config.json`；Windows `%AppData%\ExitGuard\config.json`。可用 `--config PATH` 指定其他文件。普通配置不包含账户密码、控制密钥或启用状态；原生桌面版将代理列表及各自账户写入独立的 `config.json.profiles.json`（自定义配置对应 `PATH.profiles.json`）。Mac 使用 `0600` 文件权限，Windows 使用受限文件 ACL；这些是本机明文文件，不是加密保险箱，请勿分享。首次打开会导入原有远程代理及匹配的旧 `config.json.credentials.json` 账户记录，迁移或读取失败会报告错误并保持关闭。状态、事件和 API 响应不会返回账户密码。独立的 Clash 控制密钥仍只在当前进程有效。
 
 ## 可选启动入口
@@ -81,7 +85,9 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 Chrome / Edge 使用独立 `user-data-dir`、单一回环 HTTP 代理，并禁用 QUIC 和非代理 WebRTC UDP，设置 `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`。代理列表没有公网 DIRECT 回退，仅为本机控制地址保留明确例外。发起启动前核对当前方式、状态、会话版本与代理地址；暂停、重新配置或重新启用后，旧会话启动请求会被拒绝。
 
-Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。入口传入 Electron 代理参数，**当前 Claude 版本及 Code 标签页子进程是否采用这些参数仍需验证**。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则；本应用不会修改 Claude 配置。代理模式中，未采用参数的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
+Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。默认传入 Electron 代理参数，**本机 Claude 4.29.0 已实测拒绝这类参数并立即退出**。Mac 若已通过 Claude 官方管理策略将 `egressProxyUrl` 精确设置为当前 ExitGuard 入口（默认 `http://127.0.0.1:17890`），启动器会验证应用包身份及三段数字版本号至少为 `1.44121.1`，改由该应用专属策略提供代理并直接启动实际可执行文件；旧版本、版本号缺失或无法解析均拒绝启动，避免忽略策略后直连。读取顺序为 `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`、`/Library/Managed Preferences/<当前用户名>/com.anthropic.claudefordesktop.plist`，同名键以用户策略为准；任一作用域保留的 `egressProxyPacUrl` 均会优先于固定代理，因此拒绝启动。代理地址不匹配、策略无法读取或格式无效也会拒绝启动。ExitGuard 只读取这些策略，不会修改 Claude 配置或系统代理。未配置应用专属代理时保留原有参数；Windows 参数启动方式不变。策略依据：[Claude Desktop 网络代理](https://claude.com/docs/third-party/claude-desktop/network-proxy)、[管理配置](https://claude.com/docs/third-party/claude-desktop/mdm)。
+
+启动器会检查首秒内的退出结果并显示错误，不会在参数被拒绝后去掉参数重试；首秒之后的退出不由此检查持续监测。其他版本及 Code 标签页子进程是否采用参数或应用策略仍需验证。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则；代理模式中，未采用代理配置的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
 
 严格阻断保留更严格的启动条件：目标规范化路径必须列入当前策略，用户明确确认程序级范围，Mac 主程序及整个应用包中的 Mach-O `MH_EXECUTE` 辅助程序均需覆盖；包外链接或无法解析的 Mach-O 会拒绝启动。独立资料目录不隔离 OS 程序策略，同一程序的普通窗口也会受影响。更新可能新增辅助程序，目前没有自动覆盖机制。浏览器和 Electron 代理参数也不能证明系统代发 DNS 或非 Chromium 网络代码已被完整限制。
 

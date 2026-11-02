@@ -180,6 +180,9 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 	if r.scheme == "https" {
 		secure := tls.Client(c, &tls.Config{ServerName: r.serverName, RootCAs: r.roots, MinVersion: tls.VersionTLS12})
 		if e = secure.HandshakeContext(ctx); e != nil {
+			if failure := transportFailure(stageProxyTLS, e, false); failure.transient() {
+				return nil, failure
+			}
 			return nil, &upstreamError{"HTTPS 代理证书或 TLS 握手验证失败"}
 		}
 		c = secure
@@ -201,14 +204,20 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 			auth = "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(r.username+":"+r.password)) + "\r\n"
 		}
 		if _, e = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", address, address, auth); e != nil {
-			return nil, errors.New("上游代理握手失败")
+			return nil, transportFailure(stageHTTPHandshake, e, false)
 		}
 		b := bufio.NewReaderSize(c, 4096)
 		var header strings.Builder
 		for {
 			line, e := b.ReadSlice('\n')
-			if e != nil || header.Len()+len(line) > 32<<10 {
-				return nil, errors.New("上游响应头无效或过大")
+			if e != nil {
+				if header.Len() == 0 && len(line) == 0 {
+					return nil, transportFailure(stageHTTPHandshake, e, false)
+				}
+				return nil, &forwardError{stage: stageHTTPHandshake, cause: causeInvalidResponse}
+			}
+			if header.Len()+len(line) > 32<<10 {
+				return nil, &forwardError{stage: stageHTTPHandshake, cause: causeInvalidResponse}
 			}
 			header.Write(line)
 			if string(line) == "\r\n" {
@@ -216,8 +225,11 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (n
 			}
 		}
 		resp, e := http.ReadResponse(bufio.NewReader(strings.NewReader(header.String())), &http.Request{Method: "CONNECT"})
-		if e != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, errors.New("上游代理拒绝连接")
+		if e != nil {
+			return nil, &forwardError{stage: stageHTTPHandshake, cause: causeInvalidResponse}
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, &forwardError{stage: stageHTTPHandshake, cause: causeHTTPStatus, status: resp.StatusCode}
 		}
 		reader = b
 	}
