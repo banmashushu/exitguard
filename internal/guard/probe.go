@@ -36,18 +36,28 @@ const (
 	probeUnknownReadFailure
 	probeTLSProtocolFailure
 	probeForwardFailure
+	probeManagedFailure
 )
 
 // A probeError contains only an enumerated cause and an HTTP status number.
 // Raw URLs, response bodies, credentials, and transport errors are not retained.
 type probeError struct {
-	kind    probeFailure
-	status  int
-	forward *forwardError
+	kind     probeFailure
+	status   int
+	forward  *forwardError
+	preProxy bool
+	managed  managedFailureKind
 }
 
 func (e *probeError) Error() string {
+	if e.preProxy {
+		copy := *e
+		copy.preProxy = false
+		return "前置代理：" + copy.Error()
+	}
 	switch e.kind {
+	case probeManagedFailure:
+		return (&managedError{kind: e.managed}).Error()
 	case probeForwardFailure:
 		if e.forward != nil {
 			return e.forward.Error()
@@ -89,6 +99,16 @@ func (e *probeError) Error() string {
 }
 
 func safeProbeError(e error) *probeError {
+	var managed *managedError
+	if errors.As(e, &managed) {
+		return &probeError{kind: probeManagedFailure, managed: managed.kind}
+	}
+	var first *preProxyError
+	if errors.As(e, &first) {
+		copy := *first.failure
+		copy.preProxy = true
+		return &copy
+	}
 	var known *probeError
 	if errors.As(e, &known) {
 		return known
@@ -176,7 +196,7 @@ func probeIP(ctx context.Context, r interface {
 	var ready atomic.Bool
 	ctx, tracing := traceProbeHTTP(ctx, false, &ready)
 	req = req.WithContext(ctx)
-	client := routeClient(r)
+	client := routeClient(ctx, r)
 	transport := client.Transport.(*http.Transport)
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		c, e := r.DialContext(ctx, network, address)
@@ -221,3 +241,10 @@ func probeIP(ctx context.Context, r interface {
 	}
 	return validProbeIP(rawIP)
 }
+
+// The first hop's destination is the final proxy, so its refusal is route-wide.
+// Do not unwrap: a destinationError must never escape as a business-local error.
+type preProxyError struct{ failure *probeError }
+
+func (e *preProxyError) Error() string { copy := *e.failure; copy.preProxy = true; return copy.Error() }
+func firstHopFailure(e error) error    { return &preProxyError{failure: safeProbeError(e)} }

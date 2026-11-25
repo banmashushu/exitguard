@@ -25,6 +25,12 @@ type Core interface {
 	SaveRemoteProfile(model.RemoteProfileInput) (model.RemoteProfile, error)
 	SelectRemoteProfile(string) error
 	DeleteRemoteProfile(string) error
+	Subscriptions() ([]model.SubscriptionSummary, error)
+	SubscriptionNodes(string) ([]model.SubscriptionNode, error)
+	ImportSubscription(context.Context, model.SubscriptionInput) (model.SubscriptionSummary, error)
+	RefreshSubscriptionDirect(context.Context, string) (model.SubscriptionSummary, error)
+	RefreshSubscriptionViaActive(context.Context, string) (model.SubscriptionSummary, error)
+	DeleteSubscription(string) error
 }
 
 type Operations struct {
@@ -36,14 +42,15 @@ type Operations struct {
 
 // Draft is independent of status snapshots; polling never fills these fields.
 type Draft struct {
-	Mode, EnforcementMode, ProxyURL, ExpectedIPs, ProxyPort       string
-	ClashControllerURL, ClashSelector, ClashNode, TunnelInterface string
-	DNSResolverURL, DNSBootstrapIP, ProbeURL, Programs, BundleIDs string
-	AutoRecover                                                   bool
+	Mode, EnforcementMode, ProxyURL, PreProxyURL, ExpectedIPs, ProxyPort string
+	ClashControllerURL, ClashSelector, ClashNode, TunnelInterface        string
+	DNSResolverURL, DNSBootstrapIP, ProbeURL, Programs, BundleIDs        string
+	AutoRecover                                                          bool
+	ManagedSubscriptionID, ManagedNodeID                                 string
 }
 
 func draftFrom(c model.Config) Draft {
-	return Draft{Mode: c.Mode, EnforcementMode: c.EnforcementMode, ProxyURL: c.ProxyURL,
+	return Draft{Mode: c.Mode, EnforcementMode: c.EnforcementMode, ProxyURL: c.ProxyURL, PreProxyURL: c.PreProxyURL, ManagedSubscriptionID: c.ManagedSubscriptionID, ManagedNodeID: c.ManagedNodeID,
 		ExpectedIPs: strings.Join(c.ExpectedIPs, "\n"), ProxyPort: strconv.Itoa(int(c.ProxyPort)),
 		ClashControllerURL: c.ClashControllerURL, ClashSelector: c.ClashSelector, ClashNode: c.ClashNode,
 		TunnelInterface: c.TunnelInterface, DNSResolverURL: c.DNSResolverURL, DNSBootstrapIP: c.DNSBootstrapIP,
@@ -65,7 +72,7 @@ func (d Draft) config() (model.Config, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return model.Config{}, errors.New("守护端口须为 1 至 65535；运行中请保持原端口")
 	}
-	return model.Config{Mode: d.Mode, EnforcementMode: d.EnforcementMode, ProxyURL: strings.TrimSpace(d.ProxyURL),
+	return model.Config{Mode: d.Mode, EnforcementMode: d.EnforcementMode, ProxyURL: strings.TrimSpace(d.ProxyURL), PreProxyURL: strings.TrimSpace(d.PreProxyURL), ManagedSubscriptionID: d.ManagedSubscriptionID, ManagedNodeID: d.ManagedNodeID,
 		ExpectedIPs: splitLines(d.ExpectedIPs), ProxyPort: uint16(port), ClashControllerURL: strings.TrimSpace(d.ClashControllerURL),
 		ClashSelector: strings.TrimSpace(d.ClashSelector), ClashNode: strings.TrimSpace(d.ClashNode), TunnelInterface: strings.TrimSpace(d.TunnelInterface),
 		DNSResolverURL: strings.TrimSpace(d.DNSResolverURL), DNSBootstrapIP: strings.TrimSpace(d.DNSBootstrapIP), ProbeURL: strings.TrimSpace(d.ProbeURL),
@@ -103,6 +110,12 @@ type Controller struct {
 	ProfileError, OverviewProfileID                         string
 	PendingProfileAction, PendingProfileID, DeleteProfileID string
 	Advanced                                                bool
+	Subscriptions                                           []model.SubscriptionSummary
+	SubscriptionNodes                                       map[string][]model.SubscriptionNode
+	SubscriptionsLoaded                                     bool
+	SubscriptionDraft                                       SubscriptionDraft
+	subscriptionRevision                                    uint64
+	ViewedSubscriptionID, DeleteSubscriptionID              string
 }
 
 func NewController(ctx context.Context, core Core, post func(func()), ops Operations) *Controller {
@@ -132,6 +145,8 @@ func newController(ctx context.Context, core Core, post func(func()), ops Operat
 	c.Draft = draftFrom(c.Config)
 	c.startupDraftBase = c.Draft
 	c.ProfileDraft = blankProfileDraft()
+	c.SubscriptionDraft.SourceKind = "url"
+	c.SubscriptionDraft.DownloadRoute = "direct"
 	c.Remember = c.Status.UpstreamCredentialsSaved
 	return c
 }
@@ -139,7 +154,7 @@ func newController(ctx context.Context, core Core, post func(func()), ops Operat
 // Refresh reads only nonsecret core snapshots, never replacing an editing model.
 func (c *Controller) refreshCurrentState() {
 	config := c.core.Config()
-	if config.Mode != c.Config.Mode || config.ProxyURL != c.Config.ProxyURL {
+	if config.Mode != c.Config.Mode || config.ProxyURL != c.Config.ProxyURL || config.PreProxyURL != c.Config.PreProxyURL || config.ManagedSubscriptionID != c.Config.ManagedSubscriptionID || config.ManagedNodeID != c.Config.ManagedNodeID {
 		// Endpoint binding also applies if Pause suppressed a Save completion.
 		// Never leave a typed old account ready for submission to a new server.
 		c.Username, c.Password, c.Remember, c.Candidate = "", "", false, ""
@@ -400,6 +415,8 @@ func (c *Controller) Close() {
 	}
 	c.Username, c.Password, c.Secret = "", "", ""
 	c.ProfileDraft.Username, c.ProfileDraft.Password = "", ""
+	c.ProfileDraft.PreProxyUsername, c.ProfileDraft.PreProxyPassword = "", ""
+	c.SubscriptionDraft.URL, c.SubscriptionDraft.FilePath = "", ""
 	c.core.Disarm()
 }
 

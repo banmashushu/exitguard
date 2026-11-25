@@ -20,6 +20,7 @@ type recoverySnapshot struct {
 	generation                  uint64
 	config                      model.Config
 	secret, username, password  string
+	preUsername, prePassword    string
 	fingerprint, lastVerifiedIP string
 	wait                        func(context.Context, time.Duration) error
 	originCheckID               string
@@ -61,7 +62,7 @@ func (s *Service) beginRecoveryLocked(g uint64, reason string, origin ...string)
 	if e != nil || !expected(s.config, ip) || s.fingerprint == "" {
 		return false
 	}
-	snapshot := recoverySnapshot{config: copyConfig(s.config), secret: s.secret, username: s.proxyUsername, password: s.proxyPassword, fingerprint: s.fingerprint, lastVerifiedIP: ip, wait: s.recoveryWait}
+	snapshot := recoverySnapshot{config: copyConfig(s.config), secret: s.secret, username: s.proxyUsername, password: s.proxyPassword, preUsername: s.preProxyUsername, prePassword: s.preProxyPassword, fingerprint: s.fingerprint, lastVerifiedIP: ip, wait: s.recoveryWait}
 	if len(origin) != 0 {
 		snapshot.originCheckID = origin[0]
 	}
@@ -113,7 +114,7 @@ func (s *Service) recoverRoute(ctx context.Context, cancel context.CancelFunc, s
 		s.status.NextRetryAt = ""
 		s.status.Reason = fmt.Sprintf("转发已暂停，正在第 %d/%d 次核验原出口", attempt+1, len(recoveryDelays))
 		s.mu.Unlock()
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, 15*time.Second)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, limitsForConfig(snapshot.config).manual)
 		snapshot.attempt = attempt + 1
 		attemptCtx = s.startProbeTrace(attemptCtx, diagnosticRecovery, snapshot.generation, snapshot.attempt, snapshot.originCheckID)
 		candidate, ip, e := s.recoveryCandidate(attemptCtx, snapshot)
@@ -158,7 +159,7 @@ func (s *Service) recoveryCandidate(ctx context.Context, snapshot recoverySnapsh
 		ctx = s.startProbeTrace(ctx, diagnosticRecovery, snapshot.generation, snapshot.attempt, snapshot.originCheckID)
 	}
 	defer func() { s.finishProbeTrace(ctx, failure) }()
-	r, e := s.routeFor(ctx, snapshot.config, snapshot.secret, snapshot.username, snapshot.password)
+	r, e := s.routeFor(ctx, snapshot.config, snapshot.secret, snapshot.username, snapshot.password, snapshot.preUsername, snapshot.prePassword)
 	if e != nil {
 		return nil, "", safeProbeError(e)
 	}
@@ -201,6 +202,7 @@ func (s *Service) finishRecoveryBlocked(snapshot recoverySnapshot, reason, obser
 		return
 	}
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.status.State, s.status.Reason = "blocked", reason
 	if ip, e := validProbeIP(observed); e == nil {
 		s.status.ObservedIP = ip

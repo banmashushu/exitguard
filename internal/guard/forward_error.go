@@ -109,7 +109,8 @@ func dnsDialFailure(source error) error {
 	var upstream *upstreamError
 	var destination *destinationError
 	var known *forwardError
-	if errors.As(source, &upstream) || errors.As(source, &destination) || errors.As(source, &known) {
+	var first *preProxyError
+	if errors.As(source, &upstream) || errors.As(source, &destination) || errors.As(source, &known) || errors.As(source, &first) {
 		return source
 	}
 	// An unclassified socket error may be a binding/control failure, not a

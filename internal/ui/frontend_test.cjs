@@ -155,7 +155,13 @@ function element(tag="") {
   await elements["clear-proxy-credentials"].onclick();
   assert.equal(clearCalls,1,"forget must be an explicit separate action");
   assert.equal(elements["remember-proxy-credentials"].checked,false,"successful clear must reset remembered preference");
+  state.config.preProxyURL="socks5://127.0.0.1:1080";
+  state.config.managedSubscriptionID="subscription-public-id";state.config.managedNodeID="node-public-id";
+  await elements.refresh.onclick();
   await elements["config-form"].listeners.submit({preventDefault(){}});
+  assert.equal(configBody.preProxyURL,"socks5://127.0.0.1:1080","legacy advanced settings must preserve the selected profile first hop");
+  assert.equal(configBody.managedSubscriptionID,"subscription-public-id","legacy settings must preserve managed subscription");
+  assert.equal(configBody.managedNodeID,"node-public-id","legacy settings must preserve exact selected node");
   assert.equal(configBody.proxyURL,"https://proxy.example:8443");
   assert.equal(configBody.enforcementMode,"proxy-only");
   assert.equal(configBody.autoRecover,true,"explicit recovery preference must be submitted");

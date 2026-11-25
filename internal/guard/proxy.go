@@ -88,6 +88,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.boundPort = 0
 	s.closeLocked()
 	s.status.State = "stopped"
+	s.stopManagedLocked()
 	s.status.Reason = "守护服务已停止，入口已关闭"
 	s.eventLocked(s.status.Reason)
 	s.mu.Unlock()
@@ -174,7 +175,10 @@ func (s *Service) serveProxy(w http.ResponseWriter, req *http.Request) {
 		}
 		reason := "指定出口连接失败，入口已关闭"
 		var failed *upstreamError
-		if errors.As(e, &failed) {
+		var first *preProxyError
+		if errors.As(e, &first) {
+			reason = first.Error() + "，入口已关闭"
+		} else if errors.As(e, &failed) {
 			reason = failed.Error() + "，入口已关闭"
 		} else if classified != nil {
 			reason = classified.Error() + "，入口已关闭"
@@ -339,7 +343,8 @@ func (s *Service) blockProxyFailure(req *http.Request, g uint64, reason string, 
 		}
 		var classified *forwardError
 		var upstream *upstreamError
-		knownTransient := errors.As(cause, &classified) && classified.transient() || errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达"
+		var first *preProxyError
+		knownTransient := errors.As(cause, &classified) && classified.transient() || errors.As(cause, &upstream) && upstream.reason == "指定代理上游不可达" || errors.As(cause, &first) && transientRecoveryFailure(first)
 		if knownTransient {
 			s.mu.Lock()
 			recovering := s.beginRecoveryLocked(g, reason, origin)

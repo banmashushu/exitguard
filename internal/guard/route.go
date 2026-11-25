@@ -88,6 +88,8 @@ type upstreamRoute struct {
 	cancel     context.CancelFunc
 	resolver   string
 	bootstrap  string
+	preProxy   *upstreamRoute
+	firstHop   bool
 }
 
 func newUpstreamRoute(raw string) (*upstreamRoute, error) {
@@ -103,10 +105,17 @@ func (r *upstreamRoute) Fingerprint(ctx context.Context) (string, error) {
 	if ctx.Err() != nil || r.ctx.Err() != nil {
 		return "", errors.New("代理会话已关闭")
 	}
-	return r.scheme + "-upstream:" + r.serverName + ":" + r.address, nil
+	fp := r.scheme + "-upstream:" + r.serverName + ":" + r.address
+	if r.preProxy != nil {
+		fp += "|preproxy:" + r.preProxy.scheme + ":" + r.preProxy.serverName + ":" + r.preProxy.address
+	}
+	return fp, nil
 }
 func (r *upstreamRoute) transportRoots() *x509.CertPool { return r.roots }
 func (r *upstreamRoute) Probe(ctx context.Context, raw string) (string, error) {
+	if r.preProxy != nil {
+		ctx = context.WithValue(ctx, chainedVerificationKey{}, true)
+	}
 	return probeIP(ctx, r, raw)
 }
 func (r *upstreamRoute) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -144,14 +153,27 @@ func (r *upstreamRoute) DialContext(ctx context.Context, network, address string
 	}
 	return nil, errors.New("指定代理出口无法连接目标，无其他出口回退")
 }
-func (r *upstreamRoute) connect(ctx context.Context, network, address string) (connection net.Conn, failure error) {
-	if network != "tcp" && network != "tcp4" && network != "tcp6" {
-		return nil, errors.New("仅支持 TCP")
-	}
+func (r *upstreamRoute) connect(ctx context.Context, network, address string) (net.Conn, error) {
 	if _, _, e := targetAddress(address); e != nil {
 		return nil, e
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	return r.connectEndpoint(ctx, network, address)
+}
+
+// connectEndpoint accepts a previously validated destination. The sole first-hop
+// caller supplies the pinned final proxy endpoint, including legal loopback IPs.
+func (r *upstreamRoute) connectEndpoint(ctx context.Context, network, address string) (connection net.Conn, failure error) {
+	if network != "tcp" && network != "tcp4" && network != "tcp6" {
+		return nil, errors.New("仅支持 TCP")
+	}
+	var cancel context.CancelFunc
+	if r.preProxy != nil {
+		// A direct setup already allows at most 8s TCP + 8s negotiation. Share
+		// that ceiling across both hops; outer check/health budgets stay shorter.
+		ctx, cancel = context.WithTimeout(ctx, 16*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 	stopSession := context.AfterFunc(r.ctx, cancel)
 	defer stopSession()
@@ -159,11 +181,20 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (c
 		return nil, errors.New("代理会话已关闭")
 	}
 	d := net.Dialer{Timeout: 8 * time.Second}
-	tcpDone := beginProbeStage(ctx, diagnosticProxyTCP)
-	c, e := d.DialContext(ctx, "tcp", r.address)
-	tcpDone(e)
-	if e != nil {
-		return nil, &upstreamError{"指定代理上游不可达"}
+	var c net.Conn
+	var e error
+	if r.preProxy != nil {
+		c, e = r.preProxy.connectEndpoint(ctx, "tcp4", r.address)
+		if e != nil {
+			return nil, firstHopFailure(e)
+		}
+	} else {
+		tcpDone := beginProbeStage(ctx, r.probeStage(diagnosticProxyTCP))
+		c, e = d.DialContext(ctx, "tcp4", r.address)
+		tcpDone(e)
+		if e != nil {
+			return nil, &upstreamError{"指定代理上游不可达"}
+		}
 	}
 	ok := false
 	defer func() {
@@ -174,14 +205,14 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (c
 	rawConn := c
 	stop := context.AfterFunc(ctx, func() { rawConn.Close() })
 	defer stop()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(limitsForProbe(ctx).proxyHandshake)
 	if d, yes := ctx.Deadline(); yes && d.Before(deadline) {
 		deadline = d
 	}
 	_ = c.SetDeadline(deadline)
 	if r.scheme == "https" {
 		secure := tls.Client(c, &tls.Config{ServerName: r.serverName, RootCAs: r.roots, MinVersion: tls.VersionTLS12})
-		tlsDone := beginProbeStage(ctx, diagnosticProxyTLS)
+		tlsDone := beginProbeStage(ctx, r.probeStage(diagnosticProxyTLS))
 		e = secure.HandshakeContext(ctx)
 		tlsDone(e)
 		if e != nil {
@@ -204,7 +235,7 @@ func (r *upstreamRoute) connect(ctx context.Context, network, address string) (c
 			return nil, e
 		}
 	} else {
-		connectDone := beginProbeStage(ctx, diagnosticHTTPConnect)
+		connectDone := beginProbeStage(ctx, r.probeStage(diagnosticHTTPConnect))
 		defer func() { connectDone(failure) }()
 		var auth string
 		if r.username != "" {
@@ -266,14 +297,14 @@ type bufferedConn struct {
 }
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
-func routeClient(r interface {
+func routeClient(ctx context.Context, r interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
 }) *http.Client {
 	var roots *x509.CertPool
 	if trusted, ok := r.(interface{ transportRoots() *x509.CertPool }); ok {
 		roots = trusted.transportRoots()
 	}
-	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("不允许出口探测重定向") }, Transport: &http.Transport{Proxy: nil, DialContext: r.DialContext, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, DisableKeepAlives: true, MaxResponseHeaderBytes: 32 << 10}}
+	return &http.Client{Timeout: limitsForProbe(ctx).http, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("不允许出口探测重定向") }, Transport: &http.Transport{Proxy: nil, DialContext: r.DialContext, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, DisableKeepAlives: true, MaxResponseHeaderBytes: 32 << 10}}
 }
 func safeRequestURL(raw string) (*url.URL, error) {
 	if e := secureURL(raw); e != nil {

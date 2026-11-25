@@ -30,10 +30,17 @@ const (
 	diagnosticTargetHTTP
 	diagnosticTargetRead
 	diagnosticTargetTCP
+	diagnosticPreProxyLookup
+	diagnosticPreProxyTCP
+	diagnosticPreProxyTLS
+	diagnosticPreProxySOCKSNegotiation
+	diagnosticPreProxySOCKSAuth
+	diagnosticPreProxySOCKSConnect
+	diagnosticPreProxyHTTPConnect
 )
 
 func (s probeStage) String() string {
-	names := [...]string{"verify", "proxy_lookup", "proxy_tcp", "proxy_tls", "socks_negotiation", "socks_auth", "socks_connect", "http_connect", "dns_tls", "dns_http", "dns_read", "target_tls", "target_http", "target_read", "target_tcp"}
+	names := [...]string{"verify", "proxy_lookup", "proxy_tcp", "proxy_tls", "socks_negotiation", "socks_auth", "socks_connect", "http_connect", "dns_tls", "dns_http", "dns_read", "target_tls", "target_http", "target_read", "target_tcp", "preproxy_lookup", "preproxy_tcp", "preproxy_tls", "preproxy_socks_negotiation", "preproxy_socks_auth", "preproxy_socks_connect", "preproxy_http_connect"}
 	if int(s) >= len(names) {
 		return "verify"
 	}
@@ -145,6 +152,8 @@ func probeCause(e error) string {
 	}
 	p := safeProbeError(e)
 	switch p.kind {
+	case probeManagedFailure:
+		return "managed_unavailable"
 	case probeTimeout:
 		return "timeout"
 	case probeCancelled:
@@ -313,4 +322,25 @@ func probeTraceSuffix(ctx context.Context, e error) string {
 	}
 	r := t.freeze(e)
 	return fmt.Sprintf(" [check=%s stage=%s elapsed=%dms]", r.CheckID, r.Stage, r.ElapsedMS)
+}
+
+func (r *upstreamRoute) probeStage(stage probeStage) probeStage {
+	if !r.firstHop {
+		return stage
+	}
+	switch stage {
+	case diagnosticProxyTCP:
+		return diagnosticPreProxyTCP
+	case diagnosticProxyTLS:
+		return diagnosticPreProxyTLS
+	case diagnosticSOCKSNegotiation:
+		return diagnosticPreProxySOCKSNegotiation
+	case diagnosticSOCKSAuth:
+		return diagnosticPreProxySOCKSAuth
+	case diagnosticSOCKSConnect:
+		return diagnosticPreProxySOCKSConnect
+	case diagnosticHTTPConnect:
+		return diagnosticPreProxyHTTPConnect
+	}
+	return stage
 }

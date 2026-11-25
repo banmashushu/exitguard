@@ -28,7 +28,29 @@ def main():
     require(plist.get("CFBundleExecutable") == "ExitGuard", "wrong executable")
     require(plist.get("LSMinimumSystemVersion") == "13.0", "wrong macOS minimum")
     require(plist.get("CFBundleIconFile") == "AppIcon.icns", "missing configured icon")
-    require({p.name for p in (contents / "MacOS").iterdir()} == {"ExitGuard"}, "legacy or unexpected helper executable")
+    require({p.name for p in (contents / "MacOS").iterdir()} == {"ExitGuard"}, "unexpected desktop executable")
+    helpers = contents / "Helpers"
+    require(helpers.is_dir() and {p.name for p in helpers.iterdir()} == {"exitguard-proxy-supervisor", "mihomo", "mihomo-importer"}, "unexpected managed helper executable")
+    notices = contents / "Resources" / "Mihomo"
+    require(notices.is_dir() and {p.name for p in notices.iterdir()} == {"LICENSE", "SOURCE.txt", "manifest.json", "mihomo-source.tar.gz", "mihomo-vendor.tar.gz", "importer-manifest.json", "mihomo-importer-source.tar.gz"}, "incomplete managed core notices/source")
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    pinned = (repo / "internal/managedproxy/manifest.json").read_bytes()
+    require((notices / "manifest.json").read_bytes() == pinned, "managed core manifest mismatch")
+    manifest = json.loads(pinned)
+    require(hashlib.sha256((helpers / "mihomo").read_bytes()).hexdigest() == manifest["assets"]["darwin/arm64"]["binary_sha256"], "managed core differs from official pinned executable")
+    require(hashlib.sha256((notices / "mihomo-source.tar.gz").read_bytes()).hexdigest() == manifest["source_sha256"], "corresponding source mismatch")
+    require(hashlib.sha256((notices / "mihomo-vendor.tar.gz").read_bytes()).hexdigest() == manifest["vendor_sha256"], "corresponding dependency source mismatch")
+    importer_pinned = (repo / "internal/managedproxy/importer_manifest.json").read_bytes()
+    require((notices / "importer-manifest.json").read_bytes() == importer_pinned, "native importer manifest mismatch")
+    importer = json.loads(importer_pinned)
+    require(hashlib.sha256((helpers / "mihomo-importer").read_bytes()).hexdigest() == importer["assets"]["darwin/arm64"]["sha256"], "native importer binary mismatch")
+    require(hashlib.sha256((notices / "mihomo-importer-source.tar.gz").read_bytes()).hexdigest() == importer["wrapper_source_sha256"], "native importer corresponding source mismatch")
+    for name in ("LICENSE", "SOURCE.txt"):
+        require((notices / name).read_bytes() == (repo / "third_party/mihomo" / name).read_bytes(), "missing exact managed core license/source notice")
+    for helper in helpers.iterdir():
+        magic, cpu, subtype, kind = struct.unpack_from("<IIII", helper.read_bytes())
+        require(magic == 0xFEEDFACF and cpu == 0x0100000C and kind == 2, "helper/core not arm64 Mach-O")
+        subprocess.run(["codesign", "--verify", "--strict", str(helper)], check=True)
     binary = contents / "MacOS" / "ExitGuard"
     magic, cpu, subtype, kind = struct.unpack_from("<IIII", binary.read_bytes())
     require(magic == 0xFEEDFACF and cpu == 0x0100000C and kind == 2, "not an arm64 Mach-O executable")
@@ -69,7 +91,7 @@ def main():
             require(archive.read(item) == files[item.filename], f"archive content mismatch: {item.filename}")
     print("Verified: arm64 native bundle, com.exitguard.app, macOS13, complete ICNS, ad-hoc signature.")
     print(f"Verified: application version {expected_version}.")
-    print("Verified: sole desktop executable, no bundled web frontend/legacy core/private config; archive matches bundle.")
+    print("Verified: desktop plus exact owned supervisor/official pinned core; GPL license and corresponding source; no private config; archive matches bundle.")
     print(f"Archive bytes: {archive_path.stat().st_size}; SHA-256: {hashlib.sha256(archive_path.read_bytes()).hexdigest()}")
 
 

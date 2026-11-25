@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,6 +87,7 @@ func remoteProxyURL(raw string) (*url.URL, error) {
 	} else if _, e := dnsQuestion(u.Hostname(), 1); e != nil {
 		return nil, errors.New("远程代理主机名无效")
 	}
+	u.Host = net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(port))
 	return u, nil
 }
 func validateConfig(c model.Config, complete bool) error {
@@ -129,6 +131,22 @@ func validateConfig(c model.Config, complete bool) error {
 		}
 		if e != nil {
 			return e
+		}
+	}
+	if (c.ManagedSubscriptionID == "") != (c.ManagedNodeID == "") {
+		return errors.New("请选择完整的订阅与节点")
+	}
+	if c.ManagedSubscriptionID != "" {
+		if c.Mode != "remote" || c.PreProxyURL != "" || !validProfileID(c.ManagedSubscriptionID) || !validManagedNodeID(c.ManagedNodeID) {
+			return errors.New("托管订阅仅可作为远程固定代理的独立前置来源")
+		}
+	}
+	if c.PreProxyURL != "" {
+		if c.Mode != "remote" {
+			return errors.New("前置代理仅支持远程代理来源")
+		}
+		if _, e := remoteProxyURL(c.PreProxyURL); e != nil {
+			return errors.New("前置代理须为无凭证的 HTTP、HTTPS 或 SOCKS5 地址并填写明确端口")
 		}
 	}
 	for _, raw := range []string{c.ClashControllerURL} {
@@ -257,3 +275,11 @@ func persistConfig(path string, c model.Config) error {
 	return nil
 }
 func proxyAddress(c model.Config) string { return fmt.Sprintf("127.0.0.1:%d", c.ProxyPort) }
+
+func validManagedNodeID(id string) bool {
+	if len(id) != 64 || strings.ToLower(id) != id {
+		return false
+	}
+	_, e := hex.DecodeString(id)
+	return e == nil
+}

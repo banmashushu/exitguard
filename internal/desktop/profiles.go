@@ -12,17 +12,35 @@ import (
 // ProfileDraft is local editing state. Only the submitted immutable input crosses
 // into a worker. Public profile snapshots never refill either account field.
 type ProfileDraft struct {
-	ID, Name, Protocol, Host, Port, ExpectedIPs string
-	Username, Password                          string
-	HasCredentials, ClearCredentials            bool
-	originalURL                                 string
+	ID, Name, Protocol, Host, Port, ExpectedIPs      string
+	Username, Password                               string
+	HasCredentials, ClearCredentials                 bool
+	originalURL                                      string
+	FirstHopSource                                   string
+	ManagedSubscriptionID, ManagedNodeID             string
+	PreProxyProtocol, PreProxyHost, PreProxyPort     string
+	PreProxyUsername, PreProxyPassword               string
+	HasPreProxyCredentials, ClearPreProxyCredentials bool
+	originalPreProxyURL                              string
 }
 
-func blankProfileDraft() ProfileDraft { return ProfileDraft{Protocol: "HTTPS", Port: "443"} }
+func blankProfileDraft() ProfileDraft {
+	return ProfileDraft{Protocol: "HTTPS", Port: "443", FirstHopSource: "none", PreProxyProtocol: "HTTP", PreProxyPort: "8080"}
+}
 
 func profileDraftFrom(p model.RemoteProfile) ProfileDraft {
-	d := ProfileDraft{ID: p.ID, Name: p.Name, ExpectedIPs: strings.Join(p.ExpectedIPs, ", "), HasCredentials: p.HasCredentials, originalURL: p.ProxyURL}
+	d := blankProfileDraft()
+	d.ID, d.Name, d.ExpectedIPs = p.ID, p.Name, strings.Join(p.ExpectedIPs, ", ")
+	d.HasCredentials, d.originalURL = p.HasCredentials, p.ProxyURL
 	d.Protocol, d.Host, d.Port, _ = splitProfileEndpoint(p.ProxyURL)
+	d.ManagedSubscriptionID, d.ManagedNodeID = p.ManagedSubscriptionID, p.ManagedNodeID
+	d.HasPreProxyCredentials, d.originalPreProxyURL = p.HasPreProxyCredentials, p.PreProxyURL
+	if p.ManagedSubscriptionID != "" || p.ManagedNodeID != "" {
+		d.FirstHopSource = "subscription"
+	} else if p.PreProxyURL != "" {
+		d.FirstHopSource = "proxy"
+		d.PreProxyProtocol, d.PreProxyHost, d.PreProxyPort, _ = splitProfileEndpoint(p.PreProxyURL)
+	}
 	return d
 }
 
@@ -56,7 +74,38 @@ func (d ProfileDraft) input() (model.RemoteProfileInput, error) {
 	if d.HasCredentials && endpoint != d.originalURL && action == "keep" {
 		return model.RemoteProfileInput{}, errors.New("已保存账户绑定原服务器；更换地址后请填写一对新账户，或明确勾选清除已保存账户")
 	}
-	return model.RemoteProfileInput{ID: d.ID, Name: name, ProxyURL: endpoint, ExpectedIPs: ips, CredentialAction: action, Username: d.Username, Password: d.Password}, nil
+	input := model.RemoteProfileInput{ID: d.ID, Name: name, ProxyURL: endpoint, ExpectedIPs: ips, CredentialAction: action, Username: d.Username, Password: d.Password,
+		ClearPreProxyCredentials: d.FirstHopSource != "proxy" || d.ClearPreProxyCredentials}
+	switch d.FirstHopSource {
+	case "none":
+		return input, nil
+	case "subscription":
+		if d.ManagedSubscriptionID == "" || d.ManagedNodeID == "" {
+			return model.RemoteProfileInput{}, errors.New("请明确选择一个订阅和可选节点；使用前仍需检查出口，不会自动选择第一跳")
+		}
+		input.ManagedSubscriptionID, input.ManagedNodeID = d.ManagedSubscriptionID, d.ManagedNodeID
+		return input, nil
+	case "proxy":
+	default:
+		return model.RemoteProfileInput{}, errors.New("请选择第一跳来源")
+	}
+	input.PreProxyURL, err = profileEndpoint(d.PreProxyProtocol, d.PreProxyHost, d.PreProxyPort)
+	if err != nil {
+		return model.RemoteProfileInput{}, errors.New("前置代理：" + err.Error())
+	}
+	if d.ClearPreProxyCredentials {
+		if d.PreProxyUsername != "" || d.PreProxyPassword != "" {
+			return model.RemoteProfileInput{}, errors.New("前置代理：清除账户与填写新账户只能选择一种；请清空新账户或取消清除")
+		}
+	} else if d.PreProxyUsername != "" || d.PreProxyPassword != "" {
+		if d.PreProxyUsername == "" || d.PreProxyPassword == "" {
+			return model.RemoteProfileInput{}, errors.New("前置代理：新用户名和密码需要成对填写；都留空会保留已保存账户")
+		}
+		input.PreProxyUsername, input.PreProxyPassword = d.PreProxyUsername, d.PreProxyPassword
+	} else if d.HasPreProxyCredentials && input.PreProxyURL != d.originalPreProxyURL {
+		return model.RemoteProfileInput{}, errors.New("前置代理：已保存账户绑定原服务器；更换地址后请填写一对新账户，或明确勾选清除已保存账户")
+	}
+	return input, nil
 }
 
 func (c *Controller) InitializeProfiles() {
@@ -83,6 +132,12 @@ func (c *Controller) initializeProfileDraft() {
 		current := draftFrom(c.Config)
 		if c.Draft.ProxyURL == c.startupDraftBase.ProxyURL {
 			c.Draft.ProxyURL = current.ProxyURL
+		}
+		if c.Draft.PreProxyURL == c.startupDraftBase.PreProxyURL {
+			c.Draft.PreProxyURL = current.PreProxyURL
+		}
+		if c.Draft.ManagedSubscriptionID == c.startupDraftBase.ManagedSubscriptionID && c.Draft.ManagedNodeID == c.startupDraftBase.ManagedNodeID {
+			c.Draft.ManagedSubscriptionID, c.Draft.ManagedNodeID = current.ManagedSubscriptionID, current.ManagedNodeID
 		}
 		if c.Draft.ExpectedIPs == c.startupDraftBase.ExpectedIPs {
 			c.Draft.ExpectedIPs = current.ExpectedIPs
@@ -175,12 +230,16 @@ func (c *Controller) SaveProfile() {
 		return
 	}
 	input, err := c.ProfileDraft.input()
+	if err == nil && input.ManagedSubscriptionID != "" && !c.managedNodeAvailable(input.ManagedSubscriptionID, input.ManagedNodeID) {
+		err = errors.New("请先载入订阅列表，再明确选择有效节点；原节点已移除时不会自动替换")
+	}
 	if err != nil {
 		c.Notice = err.Error()
 		return
 	}
 	revision := c.profileRevision
 	c.ProfileDraft.Username, c.ProfileDraft.Password = "", ""
+	c.ProfileDraft.PreProxyUsername, c.ProfileDraft.PreProxyPassword = "", ""
 	c.beginSettled(func(context.Context) (func(), func(), error) {
 		saved, err := c.core.SaveRemoteProfile(input)
 		if err != nil {
@@ -194,6 +253,8 @@ func (c *Controller) SaveProfile() {
 				c.ProfileDraft.ID = saved.ID
 				c.ProfileDraft.HasCredentials = saved.HasCredentials
 				c.ProfileDraft.originalURL = saved.ProxyURL
+				c.ProfileDraft.HasPreProxyCredentials = saved.HasPreProxyCredentials
+				c.ProfileDraft.originalPreProxyURL = saved.PreProxyURL
 			}
 			if !c.Dirty {
 				c.Draft = draftFrom(c.Config)
@@ -211,6 +272,10 @@ func (c *Controller) UseProfile(id string) {
 		c.Notice = "请先选择一个已保存代理"
 		return
 	}
+	if !c.savedProfileNodeAvailable(id) {
+		c.Notice = "所选代理的订阅节点已失效；请到代理设置明确重选节点并保存"
+		return
+	}
 	revision := c.draftRevision
 	c.beginSettled(func(context.Context) (func(), func(), error) {
 		err := c.core.SelectRemoteProfile(id)
@@ -223,6 +288,11 @@ func (c *Controller) UseProfile(id string) {
 			}
 		}, err
 	}, "已使用所选代理，连接保持关闭；请检查出口，再手动启动。")
+}
+
+func (c *Controller) savedProfileNodeAvailable(id string) bool {
+	p, ok := c.profile(id)
+	return !ok || p.ManagedSubscriptionID == "" || !c.SubscriptionsLoaded || c.managedNodeAvailable(p.ManagedSubscriptionID, p.ManagedNodeID)
 }
 
 func (c *Controller) canUseProfile() bool {
@@ -271,6 +341,8 @@ func (c *Controller) ConfirmDeleteProfile() {
 					// confirmation. Keep those as a fresh unsaved profile.
 					c.ProfileDraft.ID, c.ProfileDraft.originalURL = "", ""
 					c.ProfileDraft.HasCredentials, c.ProfileDraft.ClearCredentials = false, false
+					c.ProfileDraft.originalPreProxyURL = ""
+					c.ProfileDraft.HasPreProxyCredentials, c.ProfileDraft.ClearPreProxyCredentials = false, false
 				}
 			}
 			if c.OverviewProfileID == id {

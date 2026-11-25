@@ -216,7 +216,7 @@ func resolveHTTPSWithRoots(ctx context.Context, host, resolver, bootstrap string
 		port = "443"
 	}
 	endpoint := net.JoinHostPort(ip.String(), port)
-	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("安全 DNS 禁止重定向") }, Transport: &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+	client := &http.Client{Timeout: limitsForProbe(ctx).dns, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("安全 DNS 禁止重定向") }, Transport: &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		wanted := net.JoinHostPort(u.Hostname(), port)
 		if !strings.EqualFold(address, wanted) {
 			return nil, errors.New("安全 DNS 不允许其他连接")
@@ -250,6 +250,10 @@ func queryIPv4(ctx context.Context, host, resolver string, client *http.Client) 
 	tracing.headersDone(e)
 	established := connected.Load()
 	if e != nil {
+		var first *preProxyError
+		if errors.As(e, &first) {
+			return nil, first
+		}
 		var upstream *upstreamError
 		if errors.As(e, &upstream) {
 			return nil, upstream

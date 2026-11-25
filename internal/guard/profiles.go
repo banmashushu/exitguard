@@ -27,12 +27,17 @@ var errProfileSelectionRequired = errors.New("已检测到保存的代理；原�
 // A single atomic record binds each profile's route and its account. Config
 // stores only the selected identity; its remote fields are runtime snapshots.
 type remoteProfileRecord struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	ProxyURL    string   `json:"proxyURL"`
-	ExpectedIPs []string `json:"expectedIPs"`
-	Username    string   `json:"username"`
-	Password    string   `json:"password"`
+	ID                    string   `json:"id"`
+	Name                  string   `json:"name"`
+	ProxyURL              string   `json:"proxyURL"`
+	ExpectedIPs           []string `json:"expectedIPs"`
+	Username              string   `json:"username"`
+	Password              string   `json:"password"`
+	PreProxyURL           string   `json:"preProxyURL"`
+	PreProxyUsername      string   `json:"preProxyUsername"`
+	PreProxyPassword      string   `json:"preProxyPassword"`
+	ManagedSubscriptionID string   `json:"managedSubscriptionID"`
+	ManagedNodeID         string   `json:"managedNodeID"`
 }
 
 type profileLibrary struct {
@@ -41,7 +46,7 @@ type profileLibrary struct {
 }
 
 func publicProfile(p remoteProfileRecord) model.RemoteProfile {
-	return model.RemoteProfile{ID: p.ID, Name: p.Name, ProxyURL: p.ProxyURL, ExpectedIPs: append([]string{}, p.ExpectedIPs...), HasCredentials: p.Username != ""}
+	return model.RemoteProfile{ID: p.ID, Name: p.Name, ProxyURL: p.ProxyURL, ExpectedIPs: append([]string{}, p.ExpectedIPs...), HasCredentials: p.Username != "", PreProxyURL: p.PreProxyURL, HasPreProxyCredentials: p.PreProxyUsername != "", ManagedSubscriptionID: p.ManagedSubscriptionID, ManagedNodeID: p.ManagedNodeID}
 }
 
 func validProfileID(id string) bool {
@@ -50,6 +55,31 @@ func validProfileID(id string) bool {
 	}
 	_, err := hex.DecodeString(id)
 	return err == nil
+}
+
+func sameProxyEndpoint(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	left, e1 := remoteProxyURL(a)
+	right, e2 := remoteProxyURL(b)
+	return e1 == nil && e2 == nil && left.String() == right.String()
+}
+
+func normalizeProfileEndpoints(p *remoteProfileRecord) error {
+	final, err := remoteProxyURL(p.ProxyURL)
+	if err != nil {
+		return err
+	}
+	p.ProxyURL = final.String()
+	if p.PreProxyURL != "" {
+		first, err := remoteProxyURL(p.PreProxyURL)
+		if err != nil {
+			return errors.New("前置代理服务器地址无效")
+		}
+		p.PreProxyURL = first.String()
+	}
+	return nil
 }
 
 func validateProfile(p remoteProfileRecord) error {
@@ -64,11 +94,20 @@ func validateProfile(p remoteProfileRecord) error {
 	if p.ProxyURL == "" || len(p.ProxyURL) > 2048 {
 		return errors.New("请填写远程代理服务器和端口")
 	}
-	c := defaults(model.Config{Mode: "remote", EnforcementMode: "proxy-only", ProxyURL: p.ProxyURL, ExpectedIPs: p.ExpectedIPs})
+	c := defaults(model.Config{Mode: "remote", EnforcementMode: "proxy-only", ProxyURL: p.ProxyURL, ExpectedIPs: p.ExpectedIPs, PreProxyURL: p.PreProxyURL, ManagedSubscriptionID: p.ManagedSubscriptionID, ManagedNodeID: p.ManagedNodeID})
 	if err := validateConfig(c, false); err != nil {
 		return err
 	}
-	return validateProxyCredentials(p.Username, p.Password)
+	if err := validateProxyCredentials(p.Username, p.Password); err != nil {
+		return err
+	}
+	if p.PreProxyURL == "" && (p.PreProxyUsername != "" || p.PreProxyPassword != "") {
+		return errors.New("未启用前置代理时不能保存前置账户")
+	}
+	if p.ManagedSubscriptionID != "" && (p.PreProxyUsername != "" || p.PreProxyPassword != "") {
+		return errors.New("托管订阅与手动前置账户不能同时保存")
+	}
+	return validateProxyCredentials(p.PreProxyUsername, p.PreProxyPassword)
 }
 
 // Reject duplicate, unknown, null and absent members before decoding values.
@@ -130,17 +169,28 @@ func readProfileLibrary(path string) (profileLibrary, error) {
 	}
 	var version int
 	var records []json.RawMessage
-	if json.Unmarshal(fields["version"], &version) != nil || version != 1 || json.Unmarshal(fields["profiles"], &records) != nil || len(records) > maxRemoteProfiles {
+	if json.Unmarshal(fields["version"], &version) != nil || (version != 1 && version != 2 && version != 3) || json.Unmarshal(fields["profiles"], &records) != nil || len(records) > maxRemoteProfiles {
 		return empty, errProfileStorage
 	}
+	empty.Version = version
 	seen := make(map[string]bool, len(records))
 	for _, raw := range records {
-		fields, err := strictProfileObject(raw, "id", "name", "proxyURL", "expectedIPs", "username", "password")
+		keys := []string{"id", "name", "proxyURL", "expectedIPs", "username", "password"}
+		if version >= 2 {
+			keys = append(keys, "preProxyURL", "preProxyUsername", "preProxyPassword")
+		}
+		if version >= 3 {
+			keys = append(keys, "managedSubscriptionID", "managedNodeID")
+		}
+		fields, err := strictProfileObject(raw, keys...)
 		if err != nil {
 			return empty, errProfileStorage
 		}
 		var p remoteProfileRecord
 		if json.Unmarshal(raw, &p) != nil || validateProfile(p) != nil || seen[p.ID] {
+			return empty, errProfileStorage
+		}
+		if err := normalizeProfileEndpoints(&p); err != nil {
 			return empty, errProfileStorage
 		}
 		// A null array element is another partial value encoding/json accepts.
@@ -160,7 +210,7 @@ func readProfileLibrary(path string) (profileLibrary, error) {
 }
 
 func writeProfileLibrary(path string, library profileLibrary) error {
-	if !credentialPersistenceSupported || library.Version != 1 || library.Profiles == nil || len(library.Profiles) > maxRemoteProfiles {
+	if !credentialPersistenceSupported || (library.Version != 1 && library.Version != 2 && library.Version != 3) || library.Profiles == nil || len(library.Profiles) > maxRemoteProfiles {
 		return errProfileStorage
 	}
 	seen := make(map[string]bool, len(library.Profiles))
@@ -170,6 +220,7 @@ func writeProfileLibrary(path string, library profileLibrary) error {
 		}
 		seen[p.ID] = true
 	}
+	library.Version = 3
 	data, err := json.Marshal(library)
 	if err != nil || len(data)+1 > maxProfileLibrary {
 		return errProfileStorage
@@ -197,6 +248,7 @@ func (s *Service) profileFailureLocked() error {
 
 func (s *Service) profileBlockedLocked(err error) error {
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.profileError = err
 	s.status.State, s.status.Reason = "blocked", err.Error()
 	s.status.ObservedIP = ""
@@ -206,6 +258,7 @@ func (s *Service) profileBlockedLocked(err error) error {
 
 func (s *Service) profileInputFailureLocked(err error) error {
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.status.State, s.status.Reason = "blocked", err.Error()
 	s.eventLocked(s.status.Reason)
 	return err
@@ -230,6 +283,8 @@ func profileIndex(lib profileLibrary, id string) int {
 }
 
 func (s *Service) SaveRemoteProfile(input model.RemoteProfileInput) (model.RemoteProfile, error) {
+	s.subscriptionMu.Lock()
+	defer s.subscriptionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	inputFailure := func(err error) (model.RemoteProfile, error) {
@@ -259,7 +314,10 @@ func (s *Service) SaveRemoteProfile(input model.RemoteProfileInput) (model.Remot
 		}
 		input.ID = hex.EncodeToString(nonce[:])
 	}
-	p := remoteProfileRecord{ID: input.ID, Name: strings.TrimSpace(input.Name), ProxyURL: strings.TrimSpace(input.ProxyURL), ExpectedIPs: append([]string{}, input.ExpectedIPs...)}
+	p := remoteProfileRecord{ID: input.ID, Name: strings.TrimSpace(input.Name), ProxyURL: strings.TrimSpace(input.ProxyURL), ExpectedIPs: append([]string{}, input.ExpectedIPs...), PreProxyURL: strings.TrimSpace(input.PreProxyURL), ManagedSubscriptionID: input.ManagedSubscriptionID, ManagedNodeID: input.ManagedNodeID}
+	if err := normalizeProfileEndpoints(&p); err != nil {
+		return inputFailure(err)
+	}
 	switch input.CredentialAction {
 	case "keep":
 		if input.Username != "" || input.Password != "" {
@@ -283,14 +341,43 @@ func (s *Service) SaveRemoteProfile(input model.RemoteProfileInput) (model.Remot
 		err = errors.New("请选择保留、替换或清除代理账户")
 	}
 	if err == nil {
+		switch {
+		case p.PreProxyURL == "":
+			if input.PreProxyUsername != "" || input.PreProxyPassword != "" {
+				err = errors.New("未启用前置代理时请清空前置账户")
+			}
+		case input.ClearPreProxyCredentials:
+			if input.PreProxyUsername != "" || input.PreProxyPassword != "" {
+				err = errors.New("清除前置账户时请清空用户名和密码")
+			}
+		case input.PreProxyUsername != "" || input.PreProxyPassword != "":
+			p.PreProxyUsername, p.PreProxyPassword = input.PreProxyUsername, input.PreProxyPassword
+			err = validateProxyCredentials(p.PreProxyUsername, p.PreProxyPassword)
+		case old.PreProxyUsername != "" && old.PreProxyURL != p.PreProxyURL:
+			err = errors.New("更改前置服务器后不能沿用旧账户，请重新填写或清除账户")
+		default:
+			p.PreProxyUsername, p.PreProxyPassword = old.PreProxyUsername, old.PreProxyPassword
+		}
+	}
+	if err == nil {
 		err = validateProfile(p)
 	}
 	if err != nil {
 		return inputFailure(err)
 	}
+	if p.ManagedSubscriptionID != "" {
+		lib, e := s.readSubscriptions()
+		if e != nil {
+			return inputFailure(e)
+		}
+		if _, e = lib.Node(p.ManagedSubscriptionID, p.ManagedNodeID); e != nil {
+			return inputFailure(e)
+		}
+	}
 	active := s.config.RemoteProfileID == p.ID
 	if active {
 		s.closeLocked()
+		s.stopManagedLocked()
 	}
 	if idx >= 0 {
 		lib.Profiles[idx] = p
@@ -314,6 +401,9 @@ func (s *Service) applyProfileLocked(p remoteProfileRecord, restored bool) {
 	s.config.Mode, s.config.RemoteProfileID = "remote", p.ID
 	s.config.ProxyURL, s.config.ExpectedIPs = p.ProxyURL, append([]string{}, p.ExpectedIPs...)
 	s.proxyUsername, s.proxyPassword = p.Username, p.Password
+	s.config.PreProxyURL = p.PreProxyURL
+	s.config.ManagedSubscriptionID, s.config.ManagedNodeID = p.ManagedSubscriptionID, p.ManagedNodeID
+	s.preProxyUsername, s.preProxyPassword = p.PreProxyUsername, p.PreProxyPassword
 	s.status.UpstreamCredentialsSet = p.Username != ""
 	s.status.UpstreamCredentialsSaved = p.Username != ""
 	s.status.UpstreamCredentialsRestored = restored && p.Username != ""
@@ -328,9 +418,12 @@ func (s *Service) profileUpdatedLocked(reason string) {
 }
 
 func (s *Service) SelectRemoteProfile(id string) error {
+	s.subscriptionMu.Lock()
+	defer s.subscriptionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeLocked()
+	s.stopManagedLocked()
 	if id == "" {
 		return s.detachProfileLocked()
 	}
@@ -345,6 +438,8 @@ func (s *Service) SelectRemoteProfile(id string) error {
 	p := lib.Profiles[idx]
 	c := copyConfig(s.config)
 	c.Mode, c.RemoteProfileID, c.ProxyURL, c.ExpectedIPs = "remote", p.ID, p.ProxyURL, append([]string{}, p.ExpectedIPs...)
+	c.PreProxyURL = p.PreProxyURL
+	c.ManagedSubscriptionID, c.ManagedNodeID = p.ManagedSubscriptionID, p.ManagedNodeID
 	if err := persistConfig(s.configPath, c); err != nil {
 		return s.profileFailureLocked()
 	}
@@ -360,11 +455,14 @@ func (s *Service) SelectRemoteProfile(id string) error {
 func (s *Service) detachProfileLocked() error {
 	c := copyConfig(s.config)
 	c.RemoteProfileID, c.ProxyURL, c.ExpectedIPs = "", "", nil
+	c.PreProxyURL = ""
+	c.ManagedSubscriptionID, c.ManagedNodeID = "", ""
 	if err := persistConfig(s.configPath, c); err != nil {
 		return s.profileFailureLocked()
 	}
 	s.config = c
 	s.proxyUsername, s.proxyPassword = "", ""
+	s.preProxyUsername, s.preProxyPassword = "", ""
 	s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsSaved, s.status.UpstreamCredentialsRestored = false, false, false
 	if err := s.clearLegacyProfileCredentialsLocked(); err != nil {
 		return err
@@ -392,6 +490,7 @@ func (s *Service) DeleteRemoteProfile(id string) error {
 	active := s.config.RemoteProfileID == id
 	if active {
 		s.closeLocked()
+		s.stopManagedLocked()
 		// Detach first. A crash or failed library write can leave an unselected,
 		// recoverable profile, but never a reference to an already-deleted pair.
 		if err := s.detachProfileLocked(); err != nil {
@@ -417,7 +516,10 @@ func (s *Service) initializeProfiles() {
 		idx := profileIndex(lib, s.config.RemoteProfileID)
 		if err != nil || idx < 0 {
 			s.config.ProxyURL, s.config.ExpectedIPs = "", nil
+			s.config.PreProxyURL = ""
+			s.config.ManagedSubscriptionID, s.config.ManagedNodeID = "", ""
 			s.proxyUsername, s.proxyPassword = "", ""
+			s.preProxyUsername, s.preProxyPassword = "", ""
 			s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsSaved, s.status.UpstreamCredentialsRestored = false, false, false
 			s.profileFailureLocked()
 			return
@@ -470,16 +572,19 @@ func (s *Service) EnsureRemoteProfiles() error {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return s.profileFailureLocked()
 	}
-	p := remoteProfileRecord{ID: hex.EncodeToString(nonce[:]), Name: "当前代理", ProxyURL: s.config.ProxyURL, ExpectedIPs: append([]string{}, s.config.ExpectedIPs...)}
+	p := remoteProfileRecord{ID: hex.EncodeToString(nonce[:]), Name: "当前代理", ProxyURL: s.config.ProxyURL, ExpectedIPs: append([]string{}, s.config.ExpectedIPs...), PreProxyURL: s.config.PreProxyURL}
 	// Malformed or mismatched legacy accounts need explicit repair; do not
 	// convert them into an account-less profile that masks the storage issue.
 	account, err := readCredentialRecord(s.configPath + ".credentials.json")
 	if err == nil {
-		if account.ProxyURL != p.ProxyURL {
+		if !sameProxyEndpoint(account.ProxyURL, p.ProxyURL) {
 			return s.profileInputFailureLocked(errors.New("已保存账户与当前服务器不匹配，请重新保存或清除账户后重试导入"))
 		}
 		p.Username, p.Password = account.Username, account.Password
 	} else if !os.IsNotExist(err) {
+		return s.profileFailureLocked()
+	}
+	if err := normalizeProfileEndpoints(&p); err != nil {
 		return s.profileFailureLocked()
 	}
 	lib.Profiles = append(lib.Profiles, p)
@@ -488,6 +593,7 @@ func (s *Service) EnsureRemoteProfiles() error {
 	}
 	c := copyConfig(s.config)
 	c.RemoteProfileID = p.ID
+	c.ProxyURL, c.PreProxyURL = p.ProxyURL, p.PreProxyURL
 	if err := persistConfig(s.configPath, c); err != nil {
 		// Both legacy files and the recoverable newly created profile survive.
 		// Restart sees a library and therefore does not migrate a second copy.
@@ -525,26 +631,29 @@ func (s *Service) settleUnselectedProfilesLocked(lib profileLibrary) error {
 	}
 	s.closeLocked()
 	if hasLegacyRoute && !slices.ContainsFunc(lib.Profiles, func(p remoteProfileRecord) bool {
-		return p.ProxyURL == s.config.ProxyURL && slices.Equal(p.ExpectedIPs, s.config.ExpectedIPs) && p.Username == s.proxyUsername && p.Password == s.proxyPassword
+		return sameProxyEndpoint(p.ProxyURL, s.config.ProxyURL) && slices.Equal(p.ExpectedIPs, s.config.ExpectedIPs) && p.Username == s.proxyUsername && p.Password == s.proxyPassword && sameProxyEndpoint(p.PreProxyURL, s.config.PreProxyURL) && p.PreProxyUsername == s.preProxyUsername && p.PreProxyPassword == s.preProxyPassword
 	}) {
 		// Do not erase a legacy config that the existing user library does not
 		// fully represent, and never silently merge into or overwrite that library.
 		return s.profileBlockedLocked(errProfileSelectionRequired)
 	}
 	if hasLegacyAccount && !slices.ContainsFunc(lib.Profiles, func(p remoteProfileRecord) bool {
-		return p.ProxyURL == legacy.ProxyURL && p.Username == legacy.Username && p.Password == legacy.Password
+		return sameProxyEndpoint(p.ProxyURL, legacy.ProxyURL) && p.Username == legacy.Username && p.Password == legacy.Password
 	}) {
 		return s.profileBlockedLocked(errProfileSelectionRequired)
 	}
 	if hasLegacyRoute {
 		c := copyConfig(s.config)
 		c.ProxyURL, c.ExpectedIPs = "", nil
+		c.PreProxyURL = ""
+		c.ManagedSubscriptionID, c.ManagedNodeID = "", ""
 		if err := persistConfig(s.configPath, c); err != nil {
 			return s.profileFailureLocked()
 		}
 		s.config = c
 	}
 	s.proxyUsername, s.proxyPassword = "", ""
+	s.preProxyUsername, s.preProxyPassword = "", ""
 	s.status.UpstreamCredentialsSet, s.status.UpstreamCredentialsSaved, s.status.UpstreamCredentialsRestored = false, false, false
 	if hasLegacyAccount {
 		if err := s.clearLegacyProfileCredentialsLocked(); err != nil {

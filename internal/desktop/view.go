@@ -18,8 +18,14 @@ func (c *Controller) View(ctx *native.Context) {
 			native.Text(ctx, "ExitGuard").FontSize(25).Bold()
 			native.Text(ctx, "固定出口 · 本机代理").FontSize(12).TextColor(t.TextMuted)
 			native.Divider(ctx)
-			for _, page := range []string{"出口概览", "代理设置", "诊断与事件"} {
-				native.Button(ctx.Key(page), page).FillWidth().OnClick(func() { c.Page = page })
+			for _, page := range []string{"出口概览", "代理设置", "订阅管理", "诊断与事件"} {
+				native.Button(ctx.Key(page), page).FillWidth().OnClick(func() {
+					if page == "订阅管理" {
+						c.OpenSubscriptions()
+					} else {
+						c.Page = page
+					}
+				})
 			}
 			native.Spacer(ctx)
 			native.Text(ctx, "仅在此设备运行").FontSize(12)
@@ -32,9 +38,12 @@ func (c *Controller) View(ctx *native.Context) {
 				native.Button(ctx.Key("refresh"), "刷新状态").OnClick(c.Refresh)
 			})
 			native.Divider(ctx)
+			if c.Page == "订阅管理" && c.Notice != "" {
+				native.Text(ctx.Key("subscription-status"), c.Notice).FillWidth().Padding(12, 24).Background(t.Surface).Role(native.RoleStatus)
+			}
 			native.Scroll(ctx.Key("page-content")).Grow(1).FillWidth().Padding(24).Gap(18).Children(func() {
 				native.Text(ctx, "普通代理可独立运行。严格阻断仍需系统过滤部署与真实设备验收。").FontSize(12).TextColor(t.TextMuted)
-				if c.Notice != "" {
+				if c.Page != "订阅管理" && c.Notice != "" {
 					native.Text(ctx, c.Notice).Padding(12).Background(t.Surface).Role(native.RoleStatus)
 				}
 				if c.ProfileError != "" {
@@ -51,6 +60,8 @@ func (c *Controller) View(ctx *native.Context) {
 					c.settings(ctx)
 				case "诊断与事件":
 					c.diagnostics(ctx)
+				case "订阅管理":
+					c.subscriptionsView(ctx)
 				default:
 					c.overview(ctx)
 				}
@@ -74,6 +85,11 @@ func (c *Controller) overview(ctx *native.Context) {
 	}
 	native.Column(ctx.Key("status")).Padding(20).Gap(10).Background(t.Surface).Radius(12).Children(func() {
 		native.Text(ctx, "当前使用："+c.activeProfileName()).FontSize(15).Bold()
+		if c.Config.PreProxyURL != "" {
+			native.Text(ctx, "前置代理："+c.Config.PreProxyURL+" → "+c.Config.ProxyURL).FontSize(12).TextColor(t.TextMuted)
+		} else if c.Config.ManagedSubscriptionID != "" {
+			native.Text(ctx, "第一跳：内置订阅节点 → "+c.Config.ProxyURL).FontSize(12).TextColor(t.TextMuted)
+		}
 		native.Text(ctx, stateLabel(c.Status.State)).FontSize(24).Bold().TextColor(color).Role(native.RoleHeading).Level(1)
 		native.Text(ctx, c.Status.Reason)
 		native.Text(ctx, "本机入口："+c.Status.ProxyAddress).FontSize(13).TextColor(t.TextMuted)
