@@ -89,7 +89,12 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 Chrome / Edge 使用独立 `user-data-dir`、单一回环 HTTP 代理，并禁用 QUIC 和非代理 WebRTC UDP，设置 `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`。代理列表没有公网 DIRECT 回退，仅为本机控制地址保留明确例外。发起启动前核对当前方式、状态、会话版本与代理地址；暂停、重新配置或重新启用后，旧会话启动请求会被拒绝。
 
-Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。默认传入 Electron 代理参数，**本机 Claude 4.29.0 已实测拒绝这类参数并立即退出**。Mac 若已通过 Claude 官方管理策略将 `egressProxyUrl` 精确设置为当前 ExitGuard 入口（默认 `http://127.0.0.1:17890`），启动器会验证应用包身份及三段数字版本号至少为 `1.44121.1`，改由该应用专属策略提供代理并直接启动实际可执行文件；旧版本、版本号缺失或无法解析均拒绝启动，避免忽略策略后直连。读取顺序为 `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`、`/Library/Managed Preferences/<当前用户名>/com.anthropic.claudefordesktop.plist`，同名键以用户策略为准；任一作用域保留的 `egressProxyPacUrl` 均会优先于固定代理，因此拒绝启动。代理地址不匹配、策略无法读取或格式无效也会拒绝启动。ExitGuard 只读取这些策略，不会修改 Claude 配置或系统代理。未配置应用专属代理时保留原有参数；Windows 参数启动方式不变。策略依据：[Claude Desktop 网络代理](https://claude.com/docs/third-party/claude-desktop/network-proxy)、[管理配置](https://claude.com/docs/third-party/claude-desktop/mdm)。
+Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。默认传入 Electron 代理参数，**本机 Claude 4.29.0 已实测拒绝这类参数并立即退出**。Mac 若已通过 Claude 官方管理策略将 `egressProxyUrl` 精确设置为当前 ExitGuard 入口（默认 `http://127.0.0.1:17890`），启动器会验证应用包身份及三段数字版本号至少为 `1.44121.1`，改由该应用专属策略提供代理并直接启动实际可执行文件；旧版本、版本号缺失或无法解析均拒绝启动，避免忽略策略后直连。读取顺序为 `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`、`/Library/Managed Preferences/<当前用户名>/com.anthropic.claudefordesktop.plist`，同名键以用户策略为准；任一作用域保留的 `egressProxyPacUrl` 均会优先于固定代理，因此拒绝启动。代理地址不匹配、策略无法读取或格式无效也会拒绝启动。未配置应用专属代理时保留原有参数；Windows 参数启动方式不变。策略依据：[Claude Desktop 网络代理](https://claude.com/docs/third-party/claude-desktop/network-proxy)、[管理配置](https://claude.com/docs/third-party/claude-desktop/mdm)。
+
+Mac 原生版的“出口概览”也提供两个恢复入口，代理暂停时可使用。
+
+- **移除 Claude Desktop 代理**。按 macOS 提示授权，清除设备和当前用户配置中的固定代理与 PAC。完全退出并重新打开 Claude 后，应用按系统代理设置连接。
+- **无代理启动 Chrome**。先完全退出 Chrome 和独立代理窗口。此入口以 Chrome 的默认资料启动，并传入 `--no-proxy-server`。Chrome 的管理策略可优先于启动参数。[Chromium 网络设置](https://www.chromium.org/developers/design-documents/network-settings/)、[Chrome 代理策略](https://chromeenterprise.google/intl/en_ca/policies/proxy-mode/)
 
 启动器会检查首秒内的退出结果并显示错误，不会在参数被拒绝后去掉参数重试；首秒之后的退出不由此检查持续监测。其他版本及 Code 标签页子进程是否采用参数或应用策略仍需验证。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则；代理模式中，未采用代理配置的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
 

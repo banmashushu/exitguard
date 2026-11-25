@@ -28,8 +28,10 @@ type Core interface {
 }
 
 type Operations struct {
-	Discover func(context.Context) []legacy.DesktopApplication
-	Launch   func(legacy.Service, legacy.LaunchRequest) error
+	Discover                 func(context.Context) []legacy.DesktopApplication
+	Launch                   func(legacy.Service, legacy.LaunchRequest) error
+	RemoveClaudeProxy        func(context.Context) (bool, error)
+	LaunchChromeWithoutProxy func(context.Context, string) error
 }
 
 // Draft is independent of status snapshots; polling never fills these fields.
@@ -119,6 +121,12 @@ func newController(ctx context.Context, core Core, post func(func()), ops Operat
 	if ops.Launch == nil {
 		ops.Launch = legacy.LaunchApplication
 	}
+	if ops.RemoveClaudeProxy == nil {
+		ops.RemoveClaudeProxy = legacy.RemoveClaudeProxy
+	}
+	if ops.LaunchChromeWithoutProxy == nil {
+		ops.LaunchChromeWithoutProxy = legacy.LaunchChromeWithoutProxy
+	}
 	c := &Controller{core: core, ops: ops, ctx: ctx, cancel: cancel, post: post, Page: "出口概览", PreviewTarget: "chrome"}
 	c.Config, c.Status, c.Events = core.Config(), core.Status(), core.Events()
 	c.Draft = draftFrom(c.Config)
@@ -205,7 +213,9 @@ func (c *Controller) beginSettled(work func(context.Context) (func(), func(), er
 			if apply != nil {
 				apply()
 			}
-			c.Notice = success
+			if success != "" {
+				c.Notice = success
+			}
 		})
 	}()
 	return true
@@ -338,6 +348,38 @@ func (c *Controller) Launch(kind string) {
 	request := legacy.LaunchRequest{Kind: kind, Path: path, SessionRevision: &revision, AcknowledgeProgramScope: c.ScopeAck}
 	c.begin(func(context.Context) (func(), error) { return nil, c.ops.Launch(c.core, request) }, "已提交应用启动；请在目标设备验证出口、断线与真实客户端行为")
 }
+func (c *Controller) RemoveClaudeProxy() {
+	c.begin(func(ctx context.Context) (func(), error) {
+		removed, err := c.ops.RemoveClaudeProxy(ctx)
+		return func() {
+			c.Notice = "Claude Desktop 当前没有本机专用代理。若仍在运行，请完全退出并重新打开 Claude"
+			if removed {
+				c.Notice = "已移除 Claude Desktop 的本机代理。请完全退出并重新打开 Claude"
+			}
+		}, err
+	}, "")
+}
+
+func (c *Controller) LaunchChromeWithoutProxy() {
+	path := c.BrowserPath
+	if filepath.Base(path) != "Google Chrome" {
+		path = ""
+		for _, app := range c.Apps {
+			if app.BundleID == "com.google.Chrome" {
+				path = app.Path
+				break
+			}
+		}
+	}
+	if path == "" {
+		c.Notice = "未找到 Google Chrome。请填写 Chrome 的完整可执行文件路径"
+		return
+	}
+	c.begin(func(ctx context.Context) (func(), error) {
+		return nil, c.ops.LaunchChromeWithoutProxy(ctx, path)
+	}, "已请求使用默认资料无代理启动 Chrome")
+}
+
 func (c *Controller) LaunchPreview() {
 	if !c.unchanged() {
 		return

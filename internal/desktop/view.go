@@ -133,6 +133,14 @@ func (c *Controller) clients(ctx *native.Context) {
 		c.appChoice(ctx, "claude", "选择 Claude Desktop", &c.ClaudePath)
 		native.Field(ctx, "Claude 完整路径", func() { native.TextInput(ctx.Key("claude-manual"), &c.ClaudePath).Label("Claude 完整路径") })
 		native.Button(ctx.Key("launch-claude"), "启动 Claude Desktop").Disabled(c.Busy || c.Dirty || c.ProfileDirty || !c.running()).OnClick(func() { c.Launch("claude") })
+		if runtime.GOOS == "darwin" {
+			native.Divider(ctx)
+			native.Row(ctx).Gap(8).Wrap().Children(func() {
+				native.Button(ctx.Key("remove-claude-proxy"), "移除 Claude Desktop 代理").Disabled(c.Busy).OnClick(c.RemoveClaudeProxy)
+				native.Button(ctx.Key("launch-chrome-direct"), "无代理启动 Chrome").Disabled(c.Busy).OnClick(c.LaunchChromeWithoutProxy)
+			})
+			native.Text(ctx, "移除 Claude 代理需要管理员授权，重开 Claude 后生效。Chrome 须先完全退出，再用默认资料打开。").FontSize(12).TextColor(t.TextMuted)
+		}
 		native.Text(ctx, "Claude Desktop 的登录、聊天、上传与版本兼容性仍需实测；不声明 Claude Code 标签页或全部系统流量已受保护。").FontSize(12).TextColor(t.TextMuted)
 		if c.Config.EnforcementMode == "required" {
 			native.Checkbox(ctx.Key("scope-ack"), &c.ScopeAck, "我理解程序级过滤会影响同一程序的全部窗口，并已核对辅助进程范围")
