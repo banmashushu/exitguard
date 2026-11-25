@@ -1,4 +1,4 @@
-ExitGuard 0.2.1 · Mac 原生桌面版
+ExitGuard 0.2.2 · Mac 原生桌面版
 ==============================
 
 适用于 Apple 芯片 Mac，macOS 13 或更新版本。

@@ -101,7 +101,7 @@ func fetchWithDependencies(ctx context.Context, raw string, deps downloadDepende
 		if e != nil {
 			return nil, ErrDownload
 		}
-		req.Header.Set("User-Agent", "ExitGuard/0.2.1")
+		req.Header.Set("User-Agent", "ExitGuard/0.2.2")
 		resp, e := client.Do(req)
 		if e != nil {
 			transport.CloseIdleConnections()

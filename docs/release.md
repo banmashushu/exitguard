@@ -1,6 +1,6 @@
 # Release 构建
 
-v0.2.1 统一提供 Mac Apple 芯片版和 Windows x64 版。Mac 最低 macOS 13，应用为 ad-hoc 签名、未经过 Apple 公证；Windows 未签名。打包不安装应用、修改系统网络或读取用户配置与账号。
+v0.2.2 提供 Mac Apple 芯片版和 Windows x64 版。Mac 最低 macOS 13，应用为 ad-hoc 签名、未经过 Apple 公证；Windows 未签名。打包不安装应用、修改系统网络或读取用户配置与账号。
 
 先将发布源码合入 `main`，保持工作区干净（本地 `.idea` 可保留），记录完整提交 SHA。使用 Go 1.27.3、MyGo v0.7.3、NSIS 3.13 和 macOS 自带的 `hdiutil`：
 
@@ -8,7 +8,7 @@ v0.2.1 统一提供 Mac Apple 芯片版和 Windows x64 版。Mac 最低 macOS 13
 EXITGUARD_RELEASE_COMMIT=完整main提交SHA sh scripts/package-release.sh
 ```
 
-脚本只读核对当前提交等于本地 `main` 和指定 SHA，不执行 Git 提交、合并、推送或打标签。产物暂存在 `.work/release-v0.2.1/`，由发布者确认后上传：
+脚本只读核对当前提交等于本地 `main` 和指定 SHA，不执行 Git 提交、合并、推送或打标签。产物暂存在 `.work/release-v0.2.2/`，由发布者确认后上传：
 
 - `ExitGuard-macOS-arm64.dmg`
 - `ExitGuard-macOS-arm64.zip`

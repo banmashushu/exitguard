@@ -112,7 +112,7 @@ func liveRouteFetch(ctx context.Context, source string, throughGuard bool, clien
 	agent := ""
 	switch clientIdentity {
 	case "exitguard":
-		agent = "ExitGuard/0.2.1"
+		agent = "ExitGuard/0.2.2"
 	case "mihomo":
 		agent = "clash.meta/v1.19.33"
 	default:

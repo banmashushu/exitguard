@@ -9,10 +9,10 @@ OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\ExitGuard"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "InstallLocation"
 BrandingText " "
-VIProductVersion "0.2.1.0"
+VIProductVersion "0.2.2.0"
 VIAddVersionKey /LANG=1033 "ProductName" "ExitGuard"
 VIAddVersionKey /LANG=1033 "FileDescription" "ExitGuard per-user installer"
-VIAddVersionKey /LANG=1033 "FileVersion" "0.2.1"
+VIAddVersionKey /LANG=1033 "FileVersion" "0.2.2"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "ExitGuard"
 
 !include "MUI2.nsh"
@@ -100,7 +100,7 @@ Section "$(CoreComponent)" SecCore
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateShortCut "$SMPROGRAMS\ExitGuard.lnk" "$INSTDIR\ExitGuard.exe" "" "$INSTDIR\ExitGuard.ico" 0
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "DisplayName" "ExitGuard"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "DisplayVersion" "0.2.1"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "DisplayVersion" "0.2.2"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "DisplayIcon" '$\"$INSTDIR\ExitGuard.ico$\",0'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'

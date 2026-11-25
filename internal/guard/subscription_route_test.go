@@ -218,7 +218,7 @@ func sourceTLSFetcher(roots *x509.CertPool, port string) func(context.Context, s
 		defer transport.CloseIdleConnections()
 		client := http.Client{Transport: transport}
 		request, _ := http.NewRequestWithContext(ctx, "GET", raw, nil)
-		request.Header.Set("User-Agent", "ExitGuard/0.2.1")
+		request.Header.Set("User-Agent", "ExitGuard/0.2.2")
 		response, e := client.Do(request)
 		if e != nil {
 			return nil, e

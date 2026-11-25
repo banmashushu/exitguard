@@ -1,4 +1,4 @@
-ExitGuard 0.2.1 · Windows 原生桌面版
+ExitGuard 0.2.2 · Windows 原生桌面版
 ==================================
 
 适用系统：Windows 10 / 11，64 位 x64（amd64）。
