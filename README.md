@@ -81,7 +81,12 @@ HTTP / SOCKS5 到上游代理服务器的连接本身**没有 TLS**，链路观�
 
 Chrome / Edge 使用独立 `user-data-dir`、单一回环 HTTP 代理，并禁用 QUIC 和非代理 WebRTC UDP，设置 `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`。代理列表没有公网 DIRECT 回退，仅为本机控制地址保留明确例外。发起启动前核对当前方式、状态、会话版本与代理地址；暂停、重新配置或重新启用后，旧会话启动请求会被拒绝。
 
-Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。入口传入 Electron 代理参数，**当前 Claude 版本及 Code 标签页子进程是否采用这些参数仍需验证**。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则；本应用不会修改 Claude 配置。代理模式中，未采用参数的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
+Claude 入口要求实际安装的 `Claude.exe` 或 `Claude.app/Contents/MacOS/Claude`。发现已有 Claude 或无法可靠核对进程时，需用户手动完全退出后再启动；应用不会关闭已有进程。入口传入 Electron 代理参数，**当前 Claude 版本及 Code 标签页子进程是否采用这些参数仍需验证**。由 Desktop 管理提供方连接的部分会话对代理设置有独立读取规则。代理模式中，未采用参数的代码可能直接联网。进程启动成功不能代替登录、聊天、上传、长连接和断线验证；当前没有使用真实 Claude 账户完成这项验收。
+
+Mac 原生版的“出口概览”也提供两个恢复入口，代理暂停时可使用。
+
+- **移除 Claude Desktop 代理**。按 macOS 提示授权，清除设备和当前用户配置中的固定代理与 PAC。完全退出并重新打开 Claude 后，应用按系统代理设置连接。[Claude Desktop 网络代理](https://claude.com/docs/third-party/claude-desktop/network-proxy)
+- **无代理启动 Chrome**。先完全退出 Chrome 和独立代理窗口。此入口以 Chrome 的默认资料启动，并传入 `--no-proxy-server`。Chrome 的管理策略可优先于启动参数。[Chromium 网络设置](https://www.chromium.org/developers/design-documents/network-settings/)、[Chrome 代理策略](https://chromeenterprise.google/intl/en_ca/policies/proxy-mode/)
 
 严格阻断保留更严格的启动条件：目标规范化路径必须列入当前策略，用户明确确认程序级范围，Mac 主程序及整个应用包中的 Mach-O `MH_EXECUTE` 辅助程序均需覆盖；包外链接或无法解析的 Mach-O 会拒绝启动。独立资料目录不隔离 OS 程序策略，同一程序的普通窗口也会受影响。更新可能新增辅助程序，目前没有自动覆盖机制。浏览器和 Electron 代理参数也不能证明系统代发 DNS 或非 Chromium 网络代码已被完整限制。
 
