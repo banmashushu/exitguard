@@ -35,6 +35,10 @@ func TestServeReadyChannelHasFragmentTokenAndCleanLogs(t *testing.T) {
 	if err := run(ctx, []string{"serve", "--no-open", "--config", path}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
+	diagnostics, err := os.ReadFile(path + ".diagnostics.jsonl")
+	if err != nil || !bytes.Contains(diagnostics, []byte(`"event":"process_stop"`)) {
+		t.Fatalf("serve returned before its core completed diagnostic shutdown: %v", err)
+	}
 	var ready ui.Ready
 	decoder := json.NewDecoder(&stdout)
 	if err := decoder.Decode(&ready); err != nil {

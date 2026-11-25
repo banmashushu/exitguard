@@ -46,6 +46,11 @@ func (c *Controller) profilesView(ctx *native.Context) {
 					native.Column(ctx.Key("profile-" + p.ID)).FillWidth().Padding(12).Gap(5).Background(t.Surface).Radius(8).Children(func() {
 						native.Text(ctx, p.Name).Bold()
 						native.Text(ctx, p.ProxyURL).FontSize(12).TextColor(t.TextMuted)
+						if p.PreProxyURL != "" {
+							native.Text(ctx, "经前置代理："+p.PreProxyURL).FontSize(11).TextColor(t.TextMuted)
+						} else if p.ManagedSubscriptionID != "" {
+							native.Text(ctx, "第一跳：内置订阅节点").FontSize(11).TextColor(t.TextMuted)
+						}
 						native.Text(ctx, "期望出口："+or(strings.Join(p.ExpectedIPs, " / "), "尚未填写")).FontSize(11).TextColor(t.TextMuted)
 						account := "账户未保存"
 						if p.HasCredentials {
@@ -99,11 +104,12 @@ func (c *Controller) profilesView(ctx *native.Context) {
 			} else {
 				native.Text(ctx, "无需认证可留空；新账户需要同时填写用户名和密码。").FontSize(12).TextColor(t.TextMuted)
 			}
+			c.preProxyFields(ctx)
 			c.profileField(ctx, "profile-expected", "期望出口 IP（可先留空）", &c.ProfileDraft.ExpectedIPs, false)
 			native.Text(ctx, "账户随代理配置明文保存在此设备；密码不会回填。HTTP / SOCKS5 链路本身不加密。").FontSize(11).TextColor(t.TextMuted)
 			native.Row(ctx).Gap(8).Wrap().Children(func() {
 				native.PrimaryButton(ctx.Key("profile-save"), "保存代理").Disabled(c.Busy).OnClick(c.SaveProfile)
-				native.Button(ctx.Key("profile-use"), "使用此代理").Disabled(c.Busy || !c.canUseProfile() || c.ProfileDraft.ID == "").OnClick(func() { c.UseProfile(c.ProfileDraft.ID) })
+				native.Button(ctx.Key("profile-use"), "使用此代理").Disabled(c.Busy || !c.canUseProfile() || c.ProfileDraft.ID == "" || !c.savedProfileNodeAvailable(c.ProfileDraft.ID)).OnClick(func() { c.UseProfile(c.ProfileDraft.ID) })
 				native.Button(ctx.Key("profile-revert"), "放弃修改").Disabled(c.Busy || !c.ProfileDirty).OnClick(c.RevertProfile)
 				native.Button(ctx.Key("profile-delete"), "删除代理").Disabled(c.Busy || c.ProfileDraft.ID == "").OnClick(func() { c.RequestDeleteProfile(c.ProfileDraft.ID) })
 			})
@@ -125,6 +131,118 @@ func (c *Controller) profilesView(ctx *native.Context) {
 	})
 }
 
+func (c *Controller) preProxyFields(ctx *native.Context) {
+	t := ctx.Theme()
+	native.Column(ctx.Key("preproxy-editor")).FillWidth().Padding(12).Gap(8).Background(t.Surface).Radius(8).Children(func() {
+		selected := firstHopLabels[c.ProfileDraft.FirstHopSource]
+		native.Field(ctx, "第一跳来源", func() {
+			native.Select(ctx.Key("profile-firsthop-source"), &selected, []string{firstHopLabels["none"], firstHopLabels["proxy"], firstHopLabels["subscription"]}).Label("第一跳来源").FillWidth().OnChange(func() {
+				for id, label := range firstHopLabels {
+					if label == selected {
+						c.ProfileDraft.FirstHopSource = id
+						c.MarkProfileDirty()
+						break
+					}
+				}
+				if c.ProfileDraft.FirstHopSource == "subscription" && !c.SubscriptionsLoaded {
+					c.LoadSubscriptions()
+				}
+			})
+		})
+		native.Text(ctx, "第一跳只用于连接上方固定出口；最终出口账户和期望 IP 仍由上方配置决定。编辑不会切换或启动连接。").FontSize(11).TextColor(t.TextMuted)
+		if c.ProfileDraft.FirstHopSource == "subscription" {
+			c.managedNodeFields(ctx)
+			return
+		}
+		if c.ProfileDraft.FirstHopSource != "proxy" {
+			native.Text(ctx, "选择不使用前置代理并保存，会清除已保存的第一跳地址、账户与订阅节点选择。").FontSize(11).TextColor(t.TextMuted)
+			return
+		}
+		native.Text(ctx, "已有代理地址适用于本地或远程 HTTP(S)/SOCKS5 入口。要由 ExitGuard 导入订阅并管理内核，请选择“内置订阅节点”。").FontSize(11).TextColor(t.TextMuted)
+		native.Row(ctx).Gap(10).Children(func() {
+			native.Column(ctx).Width(110).Shrink(0).Children(func() {
+				selected := c.ProfileDraft.PreProxyProtocol
+				native.Field(ctx, "前置代理协议", func() {
+					native.Select(ctx.Key("profile-preproxy-protocol"), &selected, []string{"HTTP", "HTTPS", "SOCKS5"}).Label("前置代理协议").MinWidth(0).FillWidth().OnChange(func() { c.ProfileDraft.PreProxyProtocol = selected; c.MarkProfileDirty() })
+				})
+			})
+			native.Column(ctx).Grow(1).Children(func() {
+				c.profileField(ctx, "profile-preproxy-host", "前置服务器", &c.ProfileDraft.PreProxyHost, false)
+			})
+			native.Column(ctx).Width(82).Shrink(0).Children(func() {
+				c.profileField(ctx, "profile-preproxy-port", "前置端口", &c.ProfileDraft.PreProxyPort, false)
+			})
+		})
+		native.Row(ctx).Gap(10).Children(func() {
+			native.Column(ctx).Grow(1).Children(func() {
+				c.profileField(ctx, "profile-preproxy-username", "前置代理用户名", &c.ProfileDraft.PreProxyUsername, false)
+			})
+			native.Column(ctx).Grow(1).Children(func() {
+				c.profileField(ctx, "profile-preproxy-password", "前置代理密码", &c.ProfileDraft.PreProxyPassword, true)
+			})
+		})
+		if c.ProfileDraft.HasPreProxyCredentials {
+			native.Text(ctx, "前置账户已保存；两项都留空会保留。更换前置地址时需替换或清除该账户。").FontSize(11).TextColor(t.TextMuted)
+			native.Checkbox(ctx.Key("profile-preproxy-clear-account"), &c.ProfileDraft.ClearPreProxyCredentials, "清除前置已保存账户（保存代理后生效）").OnChange(func() {
+				if c.ProfileDraft.ClearPreProxyCredentials {
+					c.ProfileDraft.PreProxyUsername, c.ProfileDraft.PreProxyPassword = "", ""
+				}
+				c.MarkProfileDirty()
+			})
+		} else {
+			native.Text(ctx, "前置账户独立于固定出口账户；无需认证可留空，否则需成对填写。").FontSize(11).TextColor(t.TextMuted)
+		}
+	})
+}
+
+var firstHopLabels = map[string]string{"none": "不使用前置代理", "proxy": "已有代理地址", "subscription": "内置订阅节点"}
+
+func (c *Controller) managedNodeFields(ctx *native.Context) {
+	t := ctx.Theme()
+	native.Row(ctx).Gap(8).Wrap().Children(func() {
+		native.Button(ctx.Key("manage-subscriptions"), "管理订阅").OnClick(c.OpenSubscriptions)
+		native.Button(ctx.Key("load-subscriptions"), "载入订阅列表").Disabled(c.Busy).OnClick(c.LoadSubscriptions)
+	})
+	if !c.SubscriptionsLoaded {
+		native.Text(ctx, "先载入本机订阅列表，再明确选择订阅和节点；不会自动选择。").FontSize(11).TextColor(t.TextMuted)
+		return
+	}
+	selected, options, ids := "请选择订阅", []string{}, map[string]string{}
+	for i, s := range c.Subscriptions {
+		label := fmt.Sprintf("%d · %s", i+1, s.Name)
+		options = append(options, label)
+		ids[label] = s.ID
+		if s.ID == c.ProfileDraft.ManagedSubscriptionID {
+			selected = label
+		}
+	}
+	native.Field(ctx, "第一跳订阅", func() {
+		native.Select(ctx.Key("profile-managed-subscription"), &selected, options).Label("第一跳订阅").FillWidth().OnChange(func() { c.ChooseManagedSubscription(ids[selected]) })
+	})
+	nodeSelected, nodeOptions, nodeIDs := "请选择节点（待检查）", []string{}, map[string]string{}
+	for i, n := range c.SubscriptionNodes[c.ProfileDraft.ManagedSubscriptionID] {
+		if !n.Supported {
+			continue
+		}
+		label := fmt.Sprintf("%d · %s · %s", i+1, n.Name, n.Type)
+		if n.SkipsTLSVerification {
+			label += " · 跳过节点证书验证"
+		}
+		nodeOptions = append(nodeOptions, label)
+		nodeIDs[label] = n.ID
+		if n.ID == c.ProfileDraft.ManagedNodeID {
+			nodeSelected = label
+		}
+	}
+	native.Field(ctx, "第一跳节点", func() {
+		native.Select(ctx.Key("profile-managed-node"), &nodeSelected, nodeOptions).Label("第一跳节点").FillWidth().OnChange(func() { c.ChooseManagedNode(nodeIDs[nodeSelected]) })
+	})
+	if c.ProfileDraft.ManagedNodeID != "" && !c.managedNodeAvailable(c.ProfileDraft.ManagedSubscriptionID, c.ProfileDraft.ManagedNodeID) {
+		native.Text(ctx, "原节点已移除或超出 ExitGuard 的当前能力，请明确重新选择；不会替换为其他节点。").FontSize(11).TextColor(t.Warning)
+	}
+	native.Text(ctx, "订阅节点是第一跳，由 ExitGuard 独立管理；保存和选择不会启动内核，检查出口时才会启动核验。").FontSize(11).TextColor(t.TextMuted)
+}
+
 func (c *Controller) profileOverviewChoice(ctx *native.Context) {
 	labels := make([]string, 0, len(c.Profiles))
 	ids := make(map[string]string, len(c.Profiles))
@@ -142,7 +260,7 @@ func (c *Controller) profileOverviewChoice(ctx *native.Context) {
 		native.Field(ctx, "选择已保存代理", func() {
 			native.Select(ctx.Key("overview-profile-choice"), &selected, labels).Label("选择已保存代理").Disabled(c.Busy).OnChange(func() { c.OverviewProfileID = ids[selected] })
 		})
-		native.Button(ctx.Key("overview-profile-use"), "使用所选代理").Disabled(c.Busy || !c.canUseProfile() || c.OverviewProfileID == "").OnClick(func() { c.UseProfile(c.OverviewProfileID) })
+		native.Button(ctx.Key("overview-profile-use"), "使用所选代理").Disabled(c.Busy || !c.canUseProfile() || c.OverviewProfileID == "" || !c.savedProfileNodeAvailable(c.OverviewProfileID)).OnClick(func() { c.UseProfile(c.OverviewProfileID) })
 		native.Text(ctx, "选择不会切换连接；明确使用后保持关闭，需要重新检查并手动启动。").FontSize(12).TextColor(ctx.Theme().TextMuted)
 	})
 }

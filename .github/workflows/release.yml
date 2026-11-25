@@ -1,0 +1,75 @@
+name: Release assets
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and upload (for example v0.2.2)
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  package:
+    # One Apple-silicon runner builds every asset: the Mac app and DMG natively,
+    # and the Windows desktop exe and NSIS installer by cross-compilation.
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+      - name: Check tag, version and main
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("mygo.json"))["version"])')
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match mygo.json version $version"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$TAG does not point to a commit on main"
+            exit 1
+          fi
+          # package-release.sh only builds a clean checkout whose local main is HEAD.
+          git branch -f main HEAD
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install pinned MyGo and NSIS
+        run: |
+          go install github.com/egoist/mygo/cmd/mygo@v0.7.3
+          brew install makensis
+          nsis=$(brew --prefix makensis)
+          {
+            echo "EXITGUARD_GO=$(go env GOROOT)/bin/go"
+            echo "EXITGUARD_MYGO=$(go env GOPATH)/bin/mygo"
+            echo "EXITGUARD_MAKENSIS=$nsis/bin/makensis"
+            echo "NSISDIR=$nsis/share/nsis"
+          } >> "$GITHUB_ENV"
+      - name: Build and verify release assets
+        run: EXITGUARD_RELEASE_COMMIT="$(git rev-parse HEAD)" sh scripts/package-release.sh
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=".work/release-$TAG"
+          gh release upload "$TAG" --clobber \
+            "$dir/ExitGuard-macOS-arm64.dmg" \
+            "$dir/ExitGuard-macOS-arm64.zip" \
+            "$dir/ExitGuard-Windows-x64-Setup.exe" \
+            "$dir/ExitGuard-Windows-x64.zip" \
+            "$dir/SHA256SUMS.txt"
+      - name: Keep packaging logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs-${{ env.TAG }}
+          path: .work/*release-v*/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore

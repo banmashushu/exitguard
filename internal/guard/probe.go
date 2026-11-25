@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 )
 
 type probeFailure uint8
@@ -34,17 +35,34 @@ const (
 	probeUnknownFailure
 	probeUnknownReadFailure
 	probeTLSProtocolFailure
+	probeForwardFailure
+	probeManagedFailure
 )
 
 // A probeError contains only an enumerated cause and an HTTP status number.
 // Raw URLs, response bodies, credentials, and transport errors are not retained.
 type probeError struct {
-	kind   probeFailure
-	status int
+	kind     probeFailure
+	status   int
+	forward  *forwardError
+	preProxy bool
+	managed  managedFailureKind
 }
 
 func (e *probeError) Error() string {
+	if e.preProxy {
+		copy := *e
+		copy.preProxy = false
+		return "前置代理：" + copy.Error()
+	}
 	switch e.kind {
+	case probeManagedFailure:
+		return (&managedError{kind: e.managed}).Error()
+	case probeForwardFailure:
+		if e.forward != nil {
+			return e.forward.Error()
+		}
+		return "公网探测网络请求失败"
 	case probeTimeout:
 		return "公网探测超时"
 	case probeCancelled:
@@ -81,9 +99,23 @@ func (e *probeError) Error() string {
 }
 
 func safeProbeError(e error) *probeError {
+	var managed *managedError
+	if errors.As(e, &managed) {
+		return &probeError{kind: probeManagedFailure, managed: managed.kind}
+	}
+	var first *preProxyError
+	if errors.As(e, &first) {
+		copy := *first.failure
+		copy.preProxy = true
+		return &copy
+	}
 	var known *probeError
 	if errors.As(e, &known) {
 		return known
+	}
+	var forward *forwardError
+	if errors.As(e, &forward) {
+		return &probeError{kind: probeForwardFailure, forward: forward}
 	}
 	var timed net.Error
 	if errors.Is(e, context.DeadlineExceeded) || errors.As(e, &timed) && timed.Timeout() {
@@ -161,7 +193,20 @@ func probeIP(ctx context.Context, r interface {
 		return "", &probeError{kind: probeInvalidAddress}
 	}
 	req.Header.Set("Accept", "application/json, text/plain")
-	resp, e := routeClient(r).Do(req)
+	var ready atomic.Bool
+	ctx, tracing := traceProbeHTTP(ctx, false, &ready)
+	req = req.WithContext(ctx)
+	client := routeClient(ctx, r)
+	transport := client.Transport.(*http.Transport)
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		c, e := r.DialContext(ctx, network, address)
+		if e == nil {
+			ready.Store(true)
+		}
+		return c, e
+	}
+	resp, e := client.Do(req)
+	tracing.headersDone(e)
 	if e != nil {
 		return "", safeProbeError(e)
 	}
@@ -169,7 +214,9 @@ func probeIP(ctx context.Context, r interface {
 	if resp.StatusCode != 200 {
 		return "", &probeError{kind: probeHTTPStatus, status: resp.StatusCode}
 	}
+	readDone := beginProbeStage(ctx, diagnosticTargetRead)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4097))
+	readDone(e)
 	if e != nil {
 		if cause := safeProbeError(e); cause.kind == probeTimeout || cause.kind == probeCancelled || cause.kind == probeNetworkFailure {
 			return "", cause
@@ -194,3 +241,10 @@ func probeIP(ctx context.Context, r interface {
 	}
 	return validProbeIP(rawIP)
 }
+
+// The first hop's destination is the final proxy, so its refusal is route-wide.
+// Do not unwrap: a destinationError must never escape as a business-local error.
+type preProxyError struct{ failure *probeError }
+
+func (e *preProxyError) Error() string { copy := *e.failure; copy.preProxy = true; return copy.Error() }
+func firstHopFailure(e error) error    { return &preProxyError{failure: safeProbeError(e)} }

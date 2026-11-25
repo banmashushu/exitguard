@@ -26,7 +26,15 @@ swiftc -parse-as-library -sdk "$EXITGUARD_FILTER_SDK" -target "$EXITGUARD_FILTER
   "$EXITGUARD_FILTER_SOURCE/FilterPolicy.swift" "$EXITGUARD_FILTER_SOURCE/FilterIdentity.swift" "$EXITGUARD_FILTER_SOURCE/FilterProcesses.swift" "$EXITGUARD_FILTER_SOURCE/FilterProcessTests.swift" -o "$EXITGUARD_FILTER_OUT/filter-process-tests"
 if [ "$EXITGUARD_FILTER_ARCH" = "$(uname -m)" ]; then
 "$EXITGUARD_FILTER_OUT/filter-policy-tests"
+# The process snapshot scans every live process on this machine and correctly
+# fails closed on any whose executable was deleted. Hosted CI runners can have
+# such a system daemon, so CI compiles this check but leaves running it to
+# development machines.
+if [ "${EXITGUARD_FILTER_SKIP_LIVE_SCAN:-}" = 1 ]; then
+echo "Live process snapshot test compiled but not run (EXITGUARD_FILTER_SKIP_LIVE_SCAN=1)."
+else
 "$EXITGUARD_FILTER_OUT/filter-process-tests"
+fi
 else
   echo "Cross-compiled tests were not executed on this CPU architecture."
 fi

@@ -196,7 +196,7 @@ def main():
     version_parts = tuple(int(part) for part in expected_version.split("."))
     require(len(version_parts) == 3 and all(0 <= part <= 65535 for part in version_parts), "unsupported configured version")
     expected_fixed_version = version_parts + (0,)
-    expected = {"ExitGuard.exe", "ExitGuard.ico", "README-zh-CN.txt", "THIRD-PARTY-NOTICES.txt", "SHA256SUMS.txt"}
+    expected = {"ExitGuard.exe", "ExitGuardProxySupervisor.exe", "MihomoImporter.exe", "mihomo.exe", "ExitGuard.ico", "README-zh-CN.txt", "THIRD-PARTY-NOTICES.txt", "SHA256SUMS.txt", "Mihomo/LICENSE", "Mihomo/SOURCE.txt", "Mihomo/manifest.json", "Mihomo/mihomo-source.tar.gz", "Mihomo/mihomo-vendor.tar.gz", "Mihomo/importer-manifest.json", "Mihomo/mihomo-importer-source.tar.gz"}
     with zipfile.ZipFile(archive_path) as archive:
         require(set(archive.namelist()) == expected and len(archive.infolist()) == len(expected), "portable files differ from allowlist")
         require(archive.testzip() is None, "archive CRC failure")
@@ -212,6 +212,27 @@ def main():
         checked.add(name)
     require(checked == expected - {"SHA256SUMS.txt"}, "incomplete checksums")
 
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    pinned = (repo / "internal/managedproxy/manifest.json").read_bytes()
+    require(files["Mihomo/manifest.json"] == pinned, "managed core manifest mismatch")
+    manifest = json.loads(pinned)
+    require(hashlib.sha256(files["mihomo.exe"]).hexdigest() == manifest["assets"]["windows/amd64"]["binary_sha256"], "managed core differs from official pinned executable")
+    require(hashlib.sha256(files["Mihomo/mihomo-source.tar.gz"]).hexdigest() == manifest["source_sha256"], "corresponding source mismatch")
+    require(hashlib.sha256(files["Mihomo/mihomo-vendor.tar.gz"]).hexdigest() == manifest["vendor_sha256"], "corresponding dependency source mismatch")
+    for notice in ("LICENSE", "SOURCE.txt"):
+        require(files["Mihomo/" + notice] == (repo / "third_party/mihomo" / notice).read_bytes(), "missing exact Mihomo license/source notice")
+    importer_pinned = (repo / "internal/managedproxy/importer_manifest.json").read_bytes()
+    require(files["Mihomo/importer-manifest.json"] == importer_pinned, "native importer manifest mismatch")
+    importer = json.loads(importer_pinned)
+    require(hashlib.sha256(files["MihomoImporter.exe"]).hexdigest() == importer["assets"]["windows/amd64"]["sha256"], "native importer binary mismatch")
+    require(hashlib.sha256(files["Mihomo/mihomo-importer-source.tar.gz"]).hexdigest() == importer["wrapper_source_sha256"], "native importer corresponding source mismatch")
+    for name in ("ExitGuardProxySupervisor.exe", "MihomoImporter.exe", "mihomo.exe"):
+        helper = PE(files[name])
+        require(helper.machine == 0x8664 and helper.magic == 0x20B, "managed helper/core not PE32+ AMD64")
+        require(helper.subsystem in (2, 3), "invalid managed helper/core subsystem")
+        require(helper.directories[4] == (0, 0), "unexpected managed helper/core signature")
+        require(not any("webview" in library.lower() for library in helper.imports()), "unexpected helper/core WebView import")
+    require(all(PE(files[name]).subsystem == 2 for name in ("ExitGuardProxySupervisor.exe", "MihomoImporter.exe")), "owned helper can open console window")
     app = PE(files["ExitGuard.exe"])
     require(app.machine == 0x8664 and app.magic == 0x20B, "desktop is not PE32+ AMD64")
     require(app.subsystem == 2, "desktop is not GUI subsystem")

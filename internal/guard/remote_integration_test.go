@@ -31,6 +31,16 @@ import (
 // OS proof is explicitly unavailable: successful activation proves proxy-only
 // forwarding works without faking the condition required by strict mode.
 func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
+	exerciseRemoteProxyOnlyForwarding(t, false)
+}
+func TestPreProxyRealNestedTLSDoHForwardingAndVerifiedRecovery(t *testing.T) {
+	requireCredentialPersistence(t)
+	exerciseRemoteProxyOnlyForwarding(t, true)
+}
+func exerciseRemoteProxyOnlyForwarding(t *testing.T, chained bool) {
+	exerciseRemoteProxyOnlyForwardingManaged(t, chained, nil)
+}
+func exerciseRemoteProxyOnlyForwardingManaged(t *testing.T, chained bool, manager managedController) {
 	var leaked atomic.Bool
 	originHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Proxy-Authorization") != "" || strings.Contains(r.Header.Get("Authorization"), "fixture-password") {
@@ -79,7 +89,7 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 	}
 	var hitsMu sync.Mutex
 	var hits []string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "CONNECT" || r.Header.Get("Proxy-Authorization") != "Basic "+base64.StdEncoding.EncodeToString([]byte("fixture-user:fixture-password")) {
 			w.WriteHeader(407)
 			return
@@ -109,7 +119,13 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 		go func() { io.Copy(up, b); done <- struct{}{} }()
 		go func() { io.Copy(down, up); done <- struct{}{} }()
 		<-done
-	}))
+	})
+	upstream := httptest.NewUnstartedServer(upstreamHandler)
+	if chained {
+		upstream.StartTLS()
+	} else {
+		upstream.Start()
+	}
 	defer upstream.Close()
 
 	s, e := New(filepath.Join(t.TempDir(), "config.json"))
@@ -126,17 +142,66 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 	c.ProxyPort, c.ExpectedIPs = port, []string{"203.0.113.7"}
 	c.ProbeURL = "https://example.com:" + portOf(secure.URL) + "/ip"
 	c.DNSResolverURL, c.DNSBootstrapIP = "https://example.com:"+portOf(doh.URL)+"/dns-query", "203.0.113.53"
+	var frontCert *x509.Certificate
+	var frontHits atomic.Int32
+	var failNext atomic.Bool
+	var managedContent []byte
+	if chained {
+		finalURL, _ := url.Parse(upstream.URL)
+		if manager == nil {
+			c.PreProxyURL, frontCert = frontProxyFixture(t, "https", finalURL.Host, "", &frontHits, &failNext)
+		} else {
+			front, _ := frontProxyFixture(t, "http", finalURL.Host, "", &frontHits, &failNext)
+			parsed, _ := url.Parse(front)
+			managedContent = []byte("proxies: [{name: Own node, type: http, server: first-node.example, port: " + parsed.Port() + ", username: front-user, password: front-password}]")
+			s.managed = manager
+		}
+		c.AutoRecover = true
+	}
 	if e = s.SaveConfig(c); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.SetProxyCredentials("fixture-user", "fixture-password"); e != nil {
+	if manager != nil {
+		summary, err := s.ImportSubscription(context.Background(), model.SubscriptionInput{Name: "Real core fixture", Content: managedContent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes, err := s.SubscriptionNodes(summary.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile, err := s.SaveRemoteProfile(model.RemoteProfileInput{Name: "Fixed through own core", ProxyURL: c.ProxyURL, ExpectedIPs: c.ExpectedIPs, CredentialAction: "replace", Username: "fixture-user", Password: "fixture-password", ManagedSubscriptionID: summary.ID, ManagedNodeID: nodes[0].ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.SelectRemoteProfile(profile.ID); err != nil {
+			t.Fatal(err)
+		}
+	} else if chained {
+		profile, err := s.SaveRemoteProfile(model.RemoteProfileInput{Name: "Full chain", ProxyURL: c.ProxyURL, ExpectedIPs: c.ExpectedIPs, CredentialAction: "replace", Username: "fixture-user", Password: "fixture-password", PreProxyURL: c.PreProxyURL, PreProxyUsername: "front-user", PreProxyPassword: "front-password"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.SelectRemoteProfile(profile.ID); err != nil {
+			t.Fatal(err)
+		}
+	} else if e = s.SetProxyCredentials("fixture-user", "fixture-password"); e != nil {
 		t.Fatal(e)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(secure.Certificate())
 	roots.AddCert(doh.Certificate())
+	if chained {
+		roots.AddCert(upstream.Certificate())
+		if frontCert != nil {
+			roots.AddCert(frontCert)
+		}
+	}
 	s.makeRemoteRoute = func(ctx context.Context, c model.Config, user, password string) (route, error) {
 		return newRemoteRouteWithDependencies(ctx, c, user, password, remoteDependencies{roots: roots})
+	}
+	s.makeChainedRemoteRoute = func(ctx context.Context, c model.Config, user, password, frontUser, frontPassword string) (route, error) {
+		return newChainedRemoteRouteWithDependencies(ctx, c, user, password, frontUser, frontPassword, remoteDependencies{roots: roots})
 	}
 	s.inspect = func(context.Context, enforce.Policy) (enforce.Proof, error) {
 		t.Error("proxy-only requested OS proof")
@@ -194,6 +259,31 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 		}
 	}
 	hitsMu.Unlock()
+	if chained && manager == nil {
+		before := s.Status().SessionRevision
+		gate := make(chan struct{})
+		s.recoveryWait = func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-gate:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		failNext.Store(true)
+		failedResponse, _ := client.Get("http://example.com:" + portOf(plain.URL) + "/payload")
+		if failedResponse != nil {
+			failedResponse.Body.Close()
+		}
+		if s.Status().State != "recovering" {
+			t.Fatal("first-hop transport failure did not pause for verified recovery:", s.Status())
+		}
+		close(gate)
+		recovered := waitRecoveryState(t, s, "proxy_active")
+		if recovered.SessionRevision <= before || recovered.ObservedIP != "203.0.113.7" || frontHits.Load() < 6 {
+			t.Fatal("same-chain recovery lost route or exit identity")
+		}
+	}
 	// A live opaque tunnel is owned by the service and closes immediately on pause.
 	tunnel, e := net.Dial("tcp4", s.Status().ProxyAddress)
 	if e != nil {
@@ -219,6 +309,11 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 	if e = s.Arm(context.Background()); e != nil {
 		t.Fatal(e)
 	}
+	if chained {
+		s.mu.Lock()
+		s.config.AutoRecover = false
+		s.mu.Unlock()
+	}
 	upstream.Close()
 	if resp, e := client.Get("http://example.com:" + portOf(plain.URL) + "/payload"); e == nil {
 		resp.Body.Close()
@@ -228,7 +323,7 @@ func TestRemoteProxyOnlyRealForwardingWithoutOSProof(t *testing.T) {
 		t.Fatalf("upstream failure did not close entry: %+v", st)
 	}
 	all, _ := json.Marshal([]any{s.Config(), s.Status(), s.Events()})
-	if strings.Contains(string(all), "fixture-user") || strings.Contains(string(all), "fixture-password") {
+	if strings.Contains(string(all), "fixture-user") || strings.Contains(string(all), "fixture-password") || strings.Contains(string(all), "front-user") || strings.Contains(string(all), "front-password") {
 		t.Fatal("credentials leaked to service output")
 	}
 }

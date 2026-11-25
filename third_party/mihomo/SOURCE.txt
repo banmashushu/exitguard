@@ -1,0 +1,39 @@
+Mihomo v1.19.33, unmodified standalone official executable
+License: GNU General Public License version 3 (see LICENSE)
+Copyright: Mihomo and Clash contributors; see corresponding source.
+
+Official repository: https://github.com/MetaCubeX/mihomo
+Official release: https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33
+Exact source commit: 3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8
+Corresponding source is included beside this notice as mihomo-source.tar.gz.
+Upstream build instructions, release workflows, go.mod and go.sum are inside
+that source archive. No Mihomo patches or modifications are applied.
+The archive is the upstream tag source from:
+https://codeload.github.com/MetaCubeX/mihomo/tar.gz/refs/tags/v1.19.33
+SHA-256: e7c596b37ff27ec487d19b1920f73e0c97a78067ea35766530ee9659ade72711
+
+The bundled manifest records exact official asset and executable SHA-256s.
+Mihomo is a separate process, with its own GPL license. ExitGuard's original
+source remains under its existing MIT license. Neither executable enables a
+system proxy, TUN or DNS listener; ExitGuard supplies only a selected leaf and
+private authenticated loopback listener. Subscription URLs are never supplied
+to the core. Source and binaries may be redistributed under their own licenses.
+
+The matching official vendored dependency source is also included as
+mihomo-vendor.tar.gz; extract its vendor/ directory beside the source go.mod.
+URL: https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/vendor.tar.gz
+SHA-256: 7ac4d4da0e6a29ef6ed18d2cf8f4c58d361d049ae364fd841acc883aa3a9e1cc
+
+Upstream's build workflow uses its custom Go toolchain. The unchanged official
+compiler artifact (not needed to run ExitGuard) is available at:
+https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/toolchain.tar.gz
+SHA-256: a827640a1ae37475583ed82eb762ed563d40a4eeb83461acfb5ee8ff10fe4a55
+Toolchain source: https://github.com/MetaCubeX/go/tree/release-branch.go1.26
+See .github/workflows/build.yml in the included source for exact build flags,
+platform matrix and upstream toolchain setup.
+
+The separately linked GPL native URI importer uses this same pinned source
+and vendor. Its corresponding wrapper source/license/build instructions are
+included as mihomo-importer-source.tar.gz. importer-manifest.json records the
+wrapper source digest and platform executable hashes. ExitGuard's main
+application does not link the native conversion library.

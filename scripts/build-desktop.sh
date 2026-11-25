@@ -32,5 +32,16 @@ case "$platform" in
   darwin/*) set -- -skip-dmg -skip-notarize -sign - ;;
   *) set -- ;;
 esac
-PATH="$go_dir:$PATH" GOTOOLCHAIN=local CGO_ENABLED=0 \
+PATH="$go_dir:$PATH" GOTOOLCHAIN=local CGO_ENABLED=0 GOFLAGS='' \
   "$mygo_bin" build -platform "$platform" -o "$output_dir" "$@" .
+
+case "$platform" in
+  darwin/arm64)
+    app_dir="$output_dir/darwin-arm64/ExitGuard.app"
+    sh scripts/stage-managed-core.sh "$platform" "$app_dir/Contents/Helpers" "$app_dir/Contents/Resources/Mihomo"
+    codesign --force --sign - "$app_dir"
+    ;;
+  windows/amd64)
+    sh scripts/stage-managed-core.sh "$platform" "$output_dir/windows-amd64" "$output_dir/windows-amd64/Mihomo"
+    ;;
+esac

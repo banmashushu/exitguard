@@ -17,6 +17,7 @@ import (
 
 	"exitguard/internal/enforce"
 	"exitguard/internal/model"
+	"exitguard/internal/subscription"
 )
 
 type route interface {
@@ -26,37 +27,50 @@ type route interface {
 	Close() error
 }
 type Service struct {
-	prepareNative   func(context.Context, string, string) (*exec.Cmd, error)
-	mu              sync.Mutex
-	checkMu         sync.Mutex
-	configPath      string
-	config          model.Config
-	status          model.Status
-	secret          string
-	proxyUsername   string
-	proxyPassword   string
-	profileError    error
-	events          []model.Event
-	generation      uint64
-	connections     map[net.Conn]struct{}
-	activeRoute     route
-	fingerprint     string
-	inspect         func(context.Context, enforce.Policy) (enforce.Proof, error)
-	makeRoute       func(model.Config, string) (route, error)
-	makeRemoteRoute func(context.Context, model.Config, string, string) (route, error)
-	running         bool
-	listener        net.Listener
-	boundPort       uint16
-	controlHandler  http.Handler
-	readySignal     chan struct{}
-	started         bool
-	cancelCheck     context.CancelFunc
-	cancelHealth    context.CancelFunc
-	runContext      context.Context
-	armedIntent     bool
-	cancelRecovery  context.CancelFunc
-	recoveryWait    func(context.Context, time.Duration) error
-	recoverySlot    chan struct{}
+	prepareNative            func(context.Context, string, string) (*exec.Cmd, error)
+	mu                       sync.Mutex
+	checkMu                  sync.Mutex
+	subscriptionMu           sync.Mutex
+	fetchSubscription        subscription.Fetcher
+	convertSubscriptionURI   subscription.URIConverter
+	fetchSubscriptionThrough func(context.Context, string, subscription.DialContext) ([]byte, error)
+	sourceOperationID        uint64
+	sourceCancels            map[uint64]context.CancelFunc
+	managed                  managedController
+	managedLease             managedLease
+	configPath               string
+	config                   model.Config
+	status                   model.Status
+	secret                   string
+	proxyUsername            string
+	proxyPassword            string
+	preProxyUsername         string
+	preProxyPassword         string
+	profileError             error
+	events                   []model.Event
+	generation               uint64
+	connections              map[net.Conn]struct{}
+	activeRoute              route
+	fingerprint              string
+	inspect                  func(context.Context, enforce.Policy) (enforce.Proof, error)
+	makeRoute                func(model.Config, string) (route, error)
+	makeRemoteRoute          func(context.Context, model.Config, string, string) (route, error)
+	makeChainedRemoteRoute   func(context.Context, model.Config, string, string, string, string) (route, error)
+	running                  bool
+	listener                 net.Listener
+	boundPort                uint16
+	controlHandler           http.Handler
+	readySignal              chan struct{}
+	started                  bool
+	cancelCheck              context.CancelFunc
+	cancelHealth             context.CancelFunc
+	runContext               context.Context
+	armedIntent              bool
+	cancelRecovery           context.CancelFunc
+	recoveryWait             func(context.Context, time.Duration) error
+	recoverySlot             chan struct{}
+	diagnostics              *probeLogger
+	lastHealthStart          time.Time
 }
 
 func New(configPath string) (*Service, error) {
@@ -64,7 +78,11 @@ func New(configPath string) (*Service, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
+	s := &Service{configPath: configPath, config: c, readySignal: make(chan struct{}), connections: make(map[net.Conn]struct{}), inspect: enforce.Inspect, makeRoute: newRoute, makeRemoteRoute: newRemoteRoute, makeChainedRemoteRoute: newChainedRemoteRoute, recoveryWait: waitRecovery, recoverySlot: make(chan struct{}, 1)}
+	s.managed = defaultManagedController(configPath)
+	s.convertSubscriptionURI = defaultSubscriptionURIConverter(configPath)
+	s.diagnostics = newProbeLogger(configPath)
+	s.diagnostics.marker("process_start")
 	s.status = model.Status{State: "unconfigured", EnforcementMode: c.EnforcementMode, Reason: "尚未验证出口，本地代理入口保持关闭", Platform: runtime.GOOS, ProxyAddress: proxyAddress(c), CredentialPersistenceSupported: credentialPersistenceSupported}
 	if c.RemoteProfileID != "" {
 		s.initializeProfiles()
@@ -110,6 +128,10 @@ func (s *Service) eventLocked(message string) {
 	}
 }
 func (s *Service) closeLocked() {
+	for id, cancel := range s.sourceCancels {
+		cancel()
+		delete(s.sourceCancels, id)
+	}
 	s.armedIntent = false
 	if s.cancelRecovery != nil {
 		s.cancelRecovery()
@@ -143,6 +165,7 @@ func (s *Service) SaveConfig(c model.Config) error {
 	if e := validateConfig(c, false); e != nil {
 		s.mu.Lock()
 		s.closeLocked()
+		s.stopManagedLocked()
 		s.status.State, s.status.Reason = "blocked", e.Error()
 		s.eventLocked("配置无效，入口已关闭")
 		s.mu.Unlock()
@@ -152,11 +175,12 @@ func (s *Service) SaveConfig(c model.Config) error {
 	defer s.mu.Unlock()
 	old := s.config
 	s.closeLocked()
+	s.stopManagedLocked()
 	if old.RemoteProfileID != "" {
 		if c.RemoteProfileID == "" {
 			c.RemoteProfileID = old.RemoteProfileID
 		}
-		if c.RemoteProfileID != old.RemoteProfileID || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL || !slices.Equal(c.ExpectedIPs, old.ExpectedIPs) {
+		if c.RemoteProfileID != old.RemoteProfileID || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL || c.PreProxyURL != old.PreProxyURL || c.ManagedSubscriptionID != old.ManagedSubscriptionID || c.ManagedNodeID != old.ManagedNodeID || !slices.Equal(c.ExpectedIPs, old.ExpectedIPs) {
 			return s.profileInputFailureLocked(errors.New("当前代理的服务器和出口请在代理配置中编辑；切换来源前请先取消使用当前代理"))
 		}
 		if s.profileError != nil {
@@ -170,6 +194,9 @@ func (s *Service) SaveConfig(c model.Config) error {
 		s.status.Reason = "运行中不能更改守护端口，请先停止服务再修改配置"
 		s.eventLocked(s.status.Reason)
 		return errors.New(s.status.Reason)
+	}
+	if c.PreProxyURL != old.PreProxyURL || c.Mode != "remote" {
+		s.preProxyUsername, s.preProxyPassword = "", ""
 	}
 	endpointChanged := c.Mode != "remote" || c.Mode != old.Mode || c.ProxyURL != old.ProxyURL
 	if endpointChanged {
@@ -301,6 +328,7 @@ func (s *Service) Disarm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.status.State = "stopped"
 	s.status.Reason = "保护入口已暂停"
 	s.eventLocked(s.status.Reason)
@@ -312,6 +340,7 @@ func (s *Service) block(g uint64, reason string) error {
 		return errors.New("验证已取消，需要重新检查")
 	}
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.status.State = "blocked"
 	s.status.Reason = reason
 	s.status.FilterActive = false
@@ -332,11 +361,17 @@ func (s *Service) blockProbe(g uint64, ctx context.Context, stage string, failur
 	reason := "公网出口与期望 IP 不符，入口已关闭"
 	if failure != nil {
 		reason = stage + safeProbeError(failure).Error()
+		reason += probeTraceSuffix(ctx, failure)
 		observed = ""
-		if transientRecoveryFailure(failure) && s.beginRecoveryLocked(g, reason) {
+		origin := ""
+		if trace := traceFrom(ctx); trace != nil {
+			origin = trace.freeze(failure).CheckID
+		}
+		if transientRecoveryFailure(failure) && s.beginRecoveryLocked(g, reason, origin) {
 			return errors.New(reason)
 		}
 	} else {
+		reason += probeTraceSuffix(ctx, errProbeMismatch)
 		var e error
 		observed, e = validProbeIP(observed)
 		if e != nil {
@@ -344,6 +379,7 @@ func (s *Service) blockProbe(g uint64, ctx context.Context, stage string, failur
 		}
 	}
 	s.closeLocked()
+	s.stopManagedLocked()
 	s.status.State, s.status.Reason = "blocked", reason
 	if observed != "" {
 		s.status.ObservedIP = observed
@@ -370,13 +406,11 @@ func expected(c model.Config, raw string) bool {
 }
 func (s *Service) Check(ctx context.Context) error { return s.validate(ctx, false) }
 func (s *Service) Arm(ctx context.Context) error   { return s.validate(ctx, true) }
-func (s *Service) validate(ctx context.Context, arm bool) error {
+func (s *Service) validate(ctx context.Context, arm bool) (failure error) {
 	if !s.checkMu.TryLock() {
 		return errors.New("已有验证任务正在运行，请等待或暂停")
 	}
 	defer s.checkMu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
 	s.mu.Lock()
 	// A native action may have been queued before a manual Pause. Check
 	// cancellation while holding the same lock as Disarm, before any mutation.
@@ -391,16 +425,25 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 	}
 	s.closeLocked()
 	g := s.generation
-	s.cancelCheck = cancel
 	c := copyConfig(s.config)
+	ctx, cancel := context.WithTimeout(ctx, limitsForConfig(c).manual)
+	defer cancel()
+	s.cancelCheck = cancel
 	secret := s.secret
 	username, password := s.proxyUsername, s.proxyPassword
+	preUsername, prePassword := s.preProxyUsername, s.preProxyPassword
 	s.status.State = "checking"
 	s.status.Reason = "正在核验指定出口"
 	s.status.FilterActive = false
 	s.status.ObservedIP = ""
 	s.status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
+	op := diagnosticCheck
+	if arm {
+		op = diagnosticArm
+	}
+	ctx = s.startProbeTrace(ctx, op, g, 0, "")
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if arm {
 		s.mu.Lock()
 		owned := s.running && s.listener != nil && s.boundPort == c.ProxyPort
@@ -420,7 +463,7 @@ func (s *Service) validate(ctx context.Context, arm bool) error {
 			return s.block(g, "系统过滤未安装、未启用或与当前目标配置不匹配")
 		}
 	}
-	r, e := s.routeFor(ctx, c, secret, username, password)
+	r, e := s.routeFor(ctx, c, secret, username, password, preUsername, prePassword, true)
 	if e != nil {
 		return s.block(g, e.Error())
 	}
@@ -514,8 +557,14 @@ func (s *Service) admission() (route, uint64, bool) {
 	return s.activeRoute, s.generation, activeState(s.status.State) && s.activeRoute != nil
 }
 func activeState(state string) bool { return state == "armed" || state == "proxy_active" }
-func (s *Service) routeFor(ctx context.Context, c model.Config, secret, username, password string) (route, error) {
+func (s *Service) routeFor(ctx context.Context, c model.Config, secret, username, password, preUsername, prePassword string, manual ...bool) (route, error) {
 	if c.Mode == "remote" {
+		if c.ManagedSubscriptionID != "" {
+			return s.managedRouteFor(ctx, c, username, password, len(manual) != 0 && manual[0])
+		}
+		if c.PreProxyURL != "" {
+			return s.makeChainedRemoteRoute(ctx, c, username, password, preUsername, prePassword)
+		}
 		return s.makeRemoteRoute(ctx, c, username, password)
 	}
 	return s.makeRoute(c, secret)
@@ -528,7 +577,7 @@ func (s *Service) health(ctx context.Context) {
 	}
 	g, c, r, fp := s.generation, copyConfig(s.config), s.activeRoute, s.fingerprint
 	s.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, limitsForConfig(c).health)
 	defer cancel()
 	s.mu.Lock()
 	if s.generation != g || !activeState(s.status.State) {
@@ -537,15 +586,20 @@ func (s *Service) health(ctx context.Context) {
 	}
 	s.cancelHealth = cancel
 	s.mu.Unlock()
+	ctx = s.startProbeTrace(ctx, diagnosticHealth, g, 0, "")
+	var failure error
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if c.EnforcementMode == "required" {
 		p, e := s.inspect(ctx, policy(c))
 		if e != nil || !p.Active || p.PolicyHash != enforce.Hash(policy(c)) {
+			failure = errors.New("policy changed")
 			_ = s.block(g, "系统过滤状态变化，入口已关闭")
 			return
 		}
 	}
 	next, e := r.Fingerprint(ctx)
 	if e != nil || fp != next {
+		failure = errRecoveryPath
 		_ = s.block(g, "出口路径变化，入口已关闭")
 		return
 	}
@@ -554,10 +608,12 @@ func (s *Service) health(ctx context.Context) {
 		ip, e = validProbeIP(ip)
 	}
 	if e != nil {
+		failure = e
 		_ = s.blockProbe(g, ctx, "公网出口检查失败：", e, "")
 		return
 	}
 	if !expected(c, ip) {
+		failure = errProbeMismatch
 		_ = s.blockProbe(g, ctx, "公网出口检查失败：", nil, ip)
 		return
 	}
@@ -570,13 +626,11 @@ func (s *Service) health(ctx context.Context) {
 }
 
 // ProbeCandidate discovers only this process's route. It never authorizes application traffic.
-func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
+func (s *Service) ProbeCandidate(ctx context.Context) (observed string, failure error) {
 	if !s.checkMu.TryLock() {
 		return "", errors.New("已有验证任务正在运行，请等待或暂停")
 	}
 	defer s.checkMu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
 	s.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		s.mu.Unlock()
@@ -589,17 +643,22 @@ func (s *Service) ProbeCandidate(ctx context.Context) (string, error) {
 	}
 	s.closeLocked()
 	g, c, secret := s.generation, copyConfig(s.config), s.secret
+	ctx, cancel := context.WithTimeout(ctx, limitsForConfig(c).manual)
+	defer cancel()
 	username, password := s.proxyUsername, s.proxyPassword
+	preUsername, prePassword := s.preProxyUsername, s.preProxyPassword
 	s.cancelCheck = cancel
 	s.status.State = "checking"
 	s.status.FilterActive = false
 	s.status.ObservedIP = ""
 	s.status.Reason = "正在探测守护进程的候选出口"
 	s.mu.Unlock()
+	ctx = s.startProbeTrace(ctx, diagnosticCandidate, g, 0, "")
+	defer func() { s.finishProbeTrace(ctx, failure) }()
 	if e := validateConfig(c, false); e != nil {
 		return "", s.block(g, e.Error())
 	}
-	r, e := s.routeFor(ctx, c, secret, username, password)
+	r, e := s.routeFor(ctx, c, secret, username, password, preUsername, prePassword, true)
 	if e != nil {
 		return "", s.block(g, e.Error())
 	}

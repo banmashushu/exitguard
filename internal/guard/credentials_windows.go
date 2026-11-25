@@ -22,8 +22,10 @@ const (
 var (
 	credentialKernel32     = syscall.NewLazyDLL("kernel32.dll")
 	credentialAdvapi32     = syscall.NewLazyDLL("advapi32.dll")
+	credentialNtdll        = syscall.NewLazyDLL("ntdll.dll")
 	credentialDriveType    = credentialKernel32.NewProc("GetDriveTypeW")
 	credentialSetFileInfo  = credentialKernel32.NewProc("SetFileInformationByHandle")
+	credentialNtSetInfo    = credentialNtdll.NewProc("NtSetInformationFile")
 	credentialSecurityInfo = credentialAdvapi32.NewProc("GetSecurityInfo")
 	credentialSDControl    = credentialAdvapi32.NewProc("GetSecurityDescriptorControl")
 	credentialConvertSD    = credentialAdvapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
@@ -296,8 +298,9 @@ func writeCredentialFile(path string, data []byte) error {
 	if err = checkCredentialReplacement(path); err != nil {
 		return err
 	}
-	// FileRenameInfo is a handle rename with a parent directory handle. It cannot
-	// copy to a different volume or preserve an old destination's permissive ACL.
+	// FileRenameInformation is a handle rename relative to a parent directory
+	// handle. It cannot copy to a different volume or preserve an old
+	// destination's permissive ACL.
 	if err = renameCredentialHandle(h, parents[len(parents)-1], filepath.Base(path)); err != nil {
 		return err
 	}
@@ -330,11 +333,17 @@ func renameCredentialHandle(h, parent syscall.Handle, name string) error {
 	})(unsafe.Pointer(&buffer[0]))
 	info.Replace, info.Parent, info.Length = 1, parent, uint32(len(filename)*2)
 	copy(unsafe.Slice((*uint16)(unsafe.Pointer(&buffer[offset])), len(filename)), filename)
-	ok, _, _ := credentialSetFileInfo.Call(uintptr(h), 3, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	// SetFileInformationByHandle(FileRenameInfo) expands a relative name against
+	// the process working directory while keeping RootDirectory, so the kernel
+	// rejects every parent-relative rename. Call the NT API with the same
+	// FILE_RENAME_INFORMATION layout to keep the rename bound to the locked parent.
+	var iosb struct{ Status, Information uintptr }
+	const fileRenameInformation = 10
+	status, _, _ := credentialNtSetInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&iosb)), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), fileRenameInformation)
 	runtime.KeepAlive(buffer)
-	if ok == 0 {
+	if uint32(status) != 0 {
 		return errCredentialStorage
-	}
+	} // STATUS_SUCCESS; the handle is synchronous, so STATUS_PENDING cannot occur.
 	return nil
 }
 

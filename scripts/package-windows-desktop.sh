@@ -1,5 +1,5 @@
 #!/bin/sh
-# Native GUI-only release: build in staging, verify, then publish named outputs.
+# Native desktop release: build in staging, verify, then publish named outputs.
 set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_dir"
@@ -29,6 +29,13 @@ package_dir="$staging_dir/package"
 mkdir "$package_dir"
 # Never copy dist, a user directory, resources/* or arbitrary build outputs.
 cp "$staging_dir/mygo/windows-amd64/ExitGuard.exe" "$package_dir/ExitGuard.exe"
+cp "$staging_dir/mygo/windows-amd64/ExitGuardProxySupervisor.exe" "$package_dir/ExitGuardProxySupervisor.exe"
+cp "$staging_dir/mygo/windows-amd64/mihomo.exe" "$package_dir/mihomo.exe"
+cp "$staging_dir/mygo/windows-amd64/MihomoImporter.exe" "$package_dir/MihomoImporter.exe"
+mkdir "$package_dir/Mihomo"
+for name in LICENSE SOURCE.txt manifest.json mihomo-source.tar.gz mihomo-vendor.tar.gz importer-manifest.json mihomo-importer-source.tar.gz; do
+  cp "$staging_dir/mygo/windows-amd64/Mihomo/$name" "$package_dir/Mihomo/$name"
+done
 python3 scripts/extract-windows-icon.py "$package_dir/ExitGuard.exe" "$package_dir/ExitGuard.ico"
 cp platform/windows/desktop/README-zh-CN.txt "$package_dir/README-zh-CN.txt"
 cp platform/windows/desktop/THIRD-PARTY-NOTICES.txt "$package_dir/THIRD-PARTY-NOTICES.txt"
@@ -39,7 +46,7 @@ import sys
 import zipfile
 
 package, output = map(pathlib.Path, sys.argv[1:])
-names = ("ExitGuard.exe", "ExitGuard.ico", "README-zh-CN.txt", "THIRD-PARTY-NOTICES.txt")
+names = ("ExitGuard.exe", "ExitGuardProxySupervisor.exe", "MihomoImporter.exe", "mihomo.exe", "ExitGuard.ico", "README-zh-CN.txt", "THIRD-PARTY-NOTICES.txt", "Mihomo/LICENSE", "Mihomo/SOURCE.txt", "Mihomo/manifest.json", "Mihomo/mihomo-source.tar.gz", "Mihomo/mihomo-vendor.tar.gz", "Mihomo/importer-manifest.json", "Mihomo/mihomo-importer-source.tar.gz")
 checksums = "".join(f"{hashlib.sha256((package / name).read_bytes()).hexdigest()}  {name}\n" for name in names)
 (package / "SHA256SUMS.txt").write_bytes(checksums.encode("utf-8"))
 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

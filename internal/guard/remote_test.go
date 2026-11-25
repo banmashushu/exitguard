@@ -148,6 +148,9 @@ func socksFixture(t *testing.T, behavior string) string {
 					<-stop
 					return
 				}
+				if behavior == "early-close" {
+					return
+				}
 				if behavior == "bad-method" {
 					c.Write([]byte{5, 1})
 					return

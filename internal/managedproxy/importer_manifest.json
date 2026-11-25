@@ -1,0 +1,18 @@
+{
+  "protocol_version": 1,
+  "core_version": "v1.19.33",
+  "source_commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+  "source_sha256": "e7c596b37ff27ec487d19b1920f73e0c97a78067ea35766530ee9659ade72711",
+  "vendor_sha256": "7ac4d4da0e6a29ef6ed18d2cf8f4c58d361d049ae364fd841acc883aa3a9e1cc",
+  "wrapper_source_sha256": "9add4c783c4f56fc89912a85ad47c7b5a067c3802f56c24efb29e7ac8437ef69",
+  "assets": {
+    "darwin/arm64": {
+      "binary": "mihomo-importer",
+      "sha256": "29416683821a58f847ceda9d92b3b835a39123e323aa467bdab3dfe3ecd1dc5b"
+    },
+    "windows/amd64": {
+      "binary": "MihomoImporter.exe",
+      "sha256": "2528b820dd9b65894545b73a4a037f12b25ce30603c207648a201ab557efd44c"
+    }
+  }
+}

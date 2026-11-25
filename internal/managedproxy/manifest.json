@@ -1,0 +1,26 @@
+{
+  "version": "v1.19.33",
+  "repository": "https://github.com/MetaCubeX/mihomo",
+  "release": "https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33",
+  "source_commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+  "source_url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/refs/tags/v1.19.33",
+  "source_sha256": "e7c596b37ff27ec487d19b1920f73e0c97a78067ea35766530ee9659ade72711",
+  "assets": {
+    "darwin/arm64": {
+      "name": "mihomo-darwin-arm64-v1.19.33.gz",
+      "archive_sha256": "060b64b0f2c9a310831db0fe4adb2878de67bfa606c311813c1f13966aa504b6",
+      "binary_sha256": "f3e8ae41397c08cbf900ce1f7c8a168285d29954e9bca5d84d69a2b2561adfe9",
+      "binary": "mihomo"
+    },
+    "windows/amd64": {
+      "name": "mihomo-windows-amd64-v1-v1.19.33.zip",
+      "archive_sha256": "fb0b960eff568459502d4ebe53e9cca203053d86ec9024fe935f19615d74d9aa",
+      "binary_sha256": "a4fbf2b8bc2b5416ce2d0d392ac59f2e0a234ea4fcf635b66bd21e62ea9641b9",
+      "binary": "mihomo.exe"
+    }
+  },
+  "vendor_url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/vendor.tar.gz",
+  "vendor_sha256": "7ac4d4da0e6a29ef6ed18d2cf8f4c58d361d049ae364fd841acc883aa3a9e1cc",
+  "toolchain_url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/toolchain.tar.gz",
+  "toolchain_sha256": "a827640a1ae37475583ed82eb762ed563d40a4eeb83461acfb5ee8ff10fe4a55"
+}

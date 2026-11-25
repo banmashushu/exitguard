@@ -23,17 +23,19 @@ import (
 // The only sockets opened by this fixture are loopback sockets. Documentation
 // addresses are protocol payloads mapped by the controlled SOCKS server.
 type destinationFixture struct {
-	s          *Service
-	client     *http.Client
-	reply      atomic.Uint32
-	malformed  atomic.Bool
-	badDNS     atomic.Bool
-	stallBody  atomic.Bool
-	badOrigin  atomic.Uint32
-	authDenied atomic.Bool
-	stop       func()
-	restart    func() error
-	stalled    chan struct{}
+	s                *Service
+	client           *http.Client
+	reply            atomic.Uint32
+	malformed        atomic.Bool
+	badDNS           atomic.Bool
+	dnsFailure       atomic.Uint32
+	localTargetDials atomic.Int32
+	stallBody        atomic.Bool
+	badOrigin        atomic.Uint32
+	authDenied       atomic.Bool
+	stop             func()
+	restart          func() error
+	stalled          chan struct{}
 }
 
 type failedDialRoute struct {
@@ -111,6 +113,32 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 	t.Cleanup(probe.Close)
 	doh := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q, _ := io.ReadAll(r.Body)
+		switch f.dnsFailure.Load() {
+		case 1: // A validated TLS connection closes before its HTTP response.
+			c, _, _ := w.(http.Hijacker).Hijack()
+			c.Close()
+			return
+		case 2, 3:
+			status := http.StatusServiceUnavailable
+			if f.dnsFailure.Load() == 3 {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, "private-dns-response", status)
+			return
+		case 4: // HTTP body transport interruption, not a complete bad DNS reply.
+			w.Header().Set("Content-Type", "application/dns-message")
+			w.Header().Set("Content-Length", "1000")
+			w.Write([]byte("partial"))
+			return
+		case 5:
+			http.Error(w, "private-dns-response", http.StatusForbidden)
+			return
+		case 6:
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Length", "1000")
+			w.Write([]byte("partial"))
+			return
+		}
 		name, _, e := dnsName(q, 12)
 		if e != nil {
 			http.Error(w, "bad fixture question", 400)
@@ -123,6 +151,9 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 		} else if name == "cname-only.invalid" {
 			binary.BigEndian.PutUint16(answer[6:8], 1)
 			answer = append(answer, 0xc0, 0x0c, 0, 5, 0, 1, 0, 0, 0, 30, 0, 14, 4, 'n', 'o', '-', 'a', 7, 'i', 'n', 'v', 'a', 'l', 'i', 'd', 0)
+		} else if name == "localhost.ptlogin2.qq.com" {
+			binary.BigEndian.PutUint16(answer[6:8], 1)
+			answer = append(answer, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 127, 0, 0, 1)
 		} else if name != "no-a.invalid" {
 			binary.BigEndian.PutUint16(answer[6:8], 1)
 			if name == "multiple-a.invalid" {
@@ -195,6 +226,9 @@ func newDestinationFixture(t *testing.T) *destinationFixture {
 					return
 				}
 				target := net.JoinHostPort(net.IP(request[4:8]).String(), fmt.Sprint(binary.BigEndian.Uint16(request[8:])))
+				if net.IP(request[4:8]).IsLoopback() {
+					f.localTargetDials.Add(1)
+				}
 				if target == "203.0.113.72:80" {
 					close(f.stalled)
 					io.Copy(io.Discard, c) // The client cancellation must close this handshake.

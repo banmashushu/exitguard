@@ -159,7 +159,8 @@ func claudeCommand(c model.Config, s model.Status, r launchRequest, platform str
 	} else {
 		return nil, errors.New("当前平台尚未支持 Claude 桌面端启动")
 	}
-	// Electron supports these switches, but a Claude version may override them.
+	// Electron supports these switches, but a Claude version may reject them.
+	// Mac launches can instead use a separately validated managed app proxy.
 	// Only required mode has a separate OS policy for non-proxy traffic.
 	return exec.Command(path, "--proxy-server=http://"+proxy, "--proxy-bypass-list=<-loopback>;"+proxy, "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"), nil
 }
@@ -173,6 +174,9 @@ func launchClaude(service Service, r launchRequest) error {
 	if err := ensureClaudeStopped(cmd.Path, runtime.GOOS); err != nil {
 		return err
 	}
+	if err := prepareClaudeProxyCommand(cmd, s.ProxyAddress); err != nil {
+		return err
+	}
 	return startIfArmed(service, s, cmd)
 }
 
@@ -182,11 +186,46 @@ func startIfArmed(service Service, expected model.Status, command *exec.Cmd) err
 	if !launchReady(config, current) || current.State != expected.State || current.EnforcementMode != expected.EnforcementMode || current.FilterActive != expected.FilterActive || current.SessionRevision != expected.SessionRevision || current.PolicyHash != expected.PolicyHash || current.ProxyAddress != expected.ProxyAddress || current.ProxyAddress != net.JoinHostPort("127.0.0.1", strconv.Itoa(int(config.ProxyPort))) {
 		return errors.New("会话状态已变化，启动已取消；请重新检查后再试")
 	}
+	// Creating a process does not mean the client accepted its arguments. Keep
+	// only a bounded diagnostic prefix; never return raw client output to the UI.
+	diagnostic := &launchDiagnostic{}
+	command.Stderr = diagnostic
+	command.WaitDelay = 250 * time.Millisecond
 	if err := command.Start(); err != nil {
 		return errors.New("目标程序未能启动，请检查安装文件与系统权限")
 	}
-	go func() { _ = command.Wait() }()
-	return nil
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+			// Browsers can hand off to an existing isolated-profile process.
+			return nil
+		}
+		message := string(diagnostic.prefix)
+		if strings.Contains(message, "refusing to start") && strings.Contains(message, "network-override switch") {
+			return errors.New("当前 Claude 版本不接受代理启动参数，已拒绝启动；此版本暂不兼容本启动入口，需要受支持的应用专属代理配置")
+		}
+		return errors.New("目标程序启动后立即退出；请检查客户端版本、安装与启动兼容性")
+	case <-timer.C:
+		// Wait continues to reap the client asynchronously, without tying the UI
+		// to its lifetime. This is not proof of network coverage or later health.
+		return nil
+	}
+}
+
+type launchDiagnostic struct{ prefix []byte }
+
+func (d *launchDiagnostic) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := 4096 - len(d.prefix)
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	d.prefix = append(d.prefix, p...)
+	return n, nil
 }
 
 func ensureClaudeStopped(path, platform string) error {

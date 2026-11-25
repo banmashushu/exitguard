@@ -19,8 +19,12 @@ func protectedProcessStarts(policy: FilterPolicy) throws -> [Double] {
             // libproc reports ESRCH for exited/corpse processes that may still
             // appear in the PID list. signal-0 can continue to find such PIDs;
             // it is not evidence that an executable remains able to run.
-            if errno == ESRCH { continue }
-            throw FilterFailure.invalid("A live executable path could not be inspected")
+            let failure = errno
+            if failure == ESRCH { continue }
+            // Report which process and errno blocked the scan; the policy is unchanged.
+            var nameBytes = [CChar](repeating: 0, count: 256)
+            let name = proc_name(pid, &nameBytes, UInt32(nameBytes.count)) > 0 ? String(cString: nameBytes) : "unknown"
+            throw FilterFailure.invalid("A live executable path could not be inspected (pid \(pid), \(name), errno \(failure) \(String(cString: strerror(failure))))")
         }
         let path = URL(fileURLWithPath: String(cString: pathBytes)).resolvingSymlinksInPath().path
         let pathMatches = policy.protects(paths: [path], identifiers: [])

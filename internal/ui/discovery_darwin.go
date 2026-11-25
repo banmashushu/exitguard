@@ -103,7 +103,7 @@ func bundleMetadata(ctx context.Context, path string) (map[string]string, error)
 			return nil, err
 		}
 		result := make(map[string]string)
-		for _, key := range []string{"CFBundleIdentifier", "CFBundleExecutable"} {
+		for _, key := range []string{"CFBundleIdentifier", "CFBundleExecutable", "CFBundleShortVersionString"} {
 			result[key], _ = values[key].(string)
 		}
 		return result, nil

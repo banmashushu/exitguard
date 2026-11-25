@@ -124,7 +124,10 @@ func serve(ctx context.Context, service *guard.Service, noOpen, consoleMode bool
 		return err
 	}
 	results := make(chan error, 1)
-	go func() { results <- service.Run(ctx) }()
+	coreDone := make(chan struct{})
+	go func() { defer close(coreDone); results <- service.Run(ctx) }()
+	// Own shutdown as well as startup, including the final diagnostic marker.
+	defer func() { cancel(); <-coreDone }()
 	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer readyCancel()
 	if err := service.WaitReady(readyCtx); err != nil {

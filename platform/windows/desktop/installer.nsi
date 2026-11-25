@@ -78,10 +78,22 @@ Section "$(CoreComponent)" SecCore
   SetOverwrite try
   ClearErrors
   File "${PACKAGE_DIR}/ExitGuard.exe"
+  File "${PACKAGE_DIR}/ExitGuardProxySupervisor.exe"
+  File "${PACKAGE_DIR}/mihomo.exe"
+  File "${PACKAGE_DIR}/MihomoImporter.exe"
   File "${PACKAGE_DIR}/ExitGuard.ico"
   File "${PACKAGE_DIR}/README-zh-CN.txt"
   File "${PACKAGE_DIR}/THIRD-PARTY-NOTICES.txt"
   File "${PACKAGE_DIR}/SHA256SUMS.txt"
+  SetOutPath "$INSTDIR\Mihomo"
+  File "${PACKAGE_DIR}/Mihomo/LICENSE"
+  File "${PACKAGE_DIR}/Mihomo/SOURCE.txt"
+  File "${PACKAGE_DIR}/Mihomo/manifest.json"
+  File "${PACKAGE_DIR}/Mihomo/mihomo-source.tar.gz"
+  File "${PACKAGE_DIR}/Mihomo/mihomo-vendor.tar.gz"
+  File "${PACKAGE_DIR}/Mihomo/importer-manifest.json"
+  File "${PACKAGE_DIR}/Mihomo/mihomo-importer-source.tar.gz"
+  SetOutPath "$INSTDIR"
   IfErrors 0 +3
     MessageBox MB_ICONSTOP "Please close ExitGuard and retry the installation."
     Abort
@@ -118,6 +130,9 @@ Section "Uninstall"
   SetShellVarContext current
   ClearErrors
   Delete "$INSTDIR\ExitGuard.exe"
+  Delete "$INSTDIR\ExitGuardProxySupervisor.exe"
+  Delete "$INSTDIR\mihomo.exe"
+  Delete "$INSTDIR\MihomoImporter.exe"
   IfErrors 0 +3
     MessageBox MB_ICONSTOP "Please close ExitGuard and retry the uninstall."
     Abort
@@ -125,6 +140,14 @@ Section "Uninstall"
   Delete "$INSTDIR\ExitGuard.ico"
   Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
   Delete "$INSTDIR\SHA256SUMS.txt"
+  Delete "$INSTDIR\Mihomo\LICENSE"
+  Delete "$INSTDIR\Mihomo\SOURCE.txt"
+  Delete "$INSTDIR\Mihomo\manifest.json"
+  Delete "$INSTDIR\Mihomo\mihomo-source.tar.gz"
+  Delete "$INSTDIR\Mihomo\mihomo-vendor.tar.gz"
+  Delete "$INSTDIR\Mihomo\importer-manifest.json"
+  Delete "$INSTDIR\Mihomo\mihomo-importer-source.tar.gz"
+  RMDir "$INSTDIR\Mihomo"
   Delete "$SMPROGRAMS\ExitGuard.lnk"
   Delete "$DESKTOP\ExitGuard.lnk"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.exitguard.app"

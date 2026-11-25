@@ -25,10 +25,51 @@ func newRemoteRoute(ctx context.Context, c model.Config, username, password stri
 	return newRemoteRouteWithDependencies(ctx, c, username, password, remoteDependencies{})
 }
 func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, username, password string, deps remoteDependencies) (route, error) {
+	return newChainedRemoteRouteWithDependencies(ctx, c, username, password, "", "", deps)
+}
+func newChainedRemoteRoute(ctx context.Context, c model.Config, username, password, preUsername, prePassword string) (route, error) {
+	return newChainedRemoteRouteWithDependencies(ctx, c, username, password, preUsername, prePassword, remoteDependencies{})
+}
+func newChainedRemoteRouteWithDependencies(ctx context.Context, c model.Config, username, password, preUsername, prePassword string, deps remoteDependencies) (route, error) {
 	if e := validateProxyCredentials(username, password); e != nil {
 		return nil, e
 	}
-	u, e := remoteProxyURL(c.ProxyURL)
+	if e := validateProxyCredentials(preUsername, prePassword); e != nil {
+		return nil, errors.New("前置代理账户格式无效")
+	}
+	final, e := resolveProxyEndpoint(ctx, c.ProxyURL, c.ProxyPort, deps, false)
+	if e != nil {
+		return nil, e
+	}
+	var pre *upstreamRoute
+	if c.PreProxyURL != "" {
+		pre, e = resolveProxyEndpoint(ctx, c.PreProxyURL, c.ProxyPort, deps, true)
+		if e != nil {
+			return nil, errors.New("前置代理服务器无效、无法解析或指向守护自身")
+		}
+		if pre.address == final.address {
+			return nil, errors.New("前置代理不能与最终代理指向同一地址和端口")
+		}
+		pre.username, pre.password = preUsername, prePassword
+	} else if preUsername != "" || prePassword != "" {
+		return nil, errors.New("未启用前置代理时不能使用前置账户")
+	}
+	if ctx.Err() != nil {
+		return nil, errors.New("远程代理初始化已取消")
+	}
+	session, cancel := context.WithCancel(context.Background())
+	final.ctx, final.cancel, final.username, final.password = session, cancel, username, password
+	final.resolver, final.bootstrap, final.preProxy = c.DNSResolverURL, c.DNSBootstrapIP, pre
+	if pre != nil {
+		pre.ctx, pre.cancel = session, cancel
+	}
+	return final, nil
+}
+
+// Proxy endpoints are resolved once per route, never by a business-target dial.
+// Both hops use bounded system DNS; business names use DoH inside the full chain.
+func resolveProxyEndpoint(ctx context.Context, raw string, guardPort uint16, deps remoteDependencies, first bool) (*upstreamRoute, error) {
+	u, e := remoteProxyURL(raw)
 	if e != nil {
 		return nil, e
 	}
@@ -41,9 +82,13 @@ func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, usernam
 		}
 		lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
-		// Only the proxy server itself is resolved with system DNS. All target
-		// names use the configured DoH service through this pinned upstream.
+		stage := diagnosticProxyLookup
+		if first {
+			stage = diagnosticPreProxyLookup
+		}
+		lookupDone := beginProbeStage(ctx, stage)
 		ips, err := lookup(lookupCtx, "ip4", host)
+		lookupDone(err)
 		if err != nil {
 			return nil, errors.New("无法解析远程代理服务器的 IPv4 地址")
 		}
@@ -59,42 +104,50 @@ func newRemoteRouteWithDependencies(ctx context.Context, c model.Config, usernam
 		return nil, errors.New("远程代理未提供可用 IPv4 地址")
 	}
 	port, _ := strconv.Atoi(u.Port())
-	if ip.IsLoopback() && port == int(c.ProxyPort) {
+	if ip.IsLoopback() && port == int(guardPort) {
 		return nil, errors.New("远程代理不能指向守护自身监听端口")
 	}
-	if ctx.Err() != nil {
-		return nil, errors.New("远程代理初始化已取消")
-	}
-	session, cancel := context.WithCancel(context.Background())
-	return &upstreamRoute{address: net.JoinHostPort(ip.String(), u.Port()), scheme: u.Scheme, serverName: host, username: username, password: password, roots: deps.roots, resolver: c.DNSResolverURL, bootstrap: c.DNSBootstrapIP, ctx: session, cancel: cancel}, nil
+	return &upstreamRoute{address: net.JoinHostPort(ip.String(), u.Port()), scheme: u.Scheme, serverName: host, roots: deps.roots, firstHop: first}, nil
 }
 
-func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
+func (r *upstreamRoute) socksConnect(ctx context.Context, c net.Conn, address string) (failure error) {
+	done := beginProbeStage(ctx, r.probeStage(diagnosticSOCKSNegotiation))
+	defer func() { done(failure) }()
 	fail := &upstreamError{"SOCKS5 代理握手或认证失败"}
 	method := byte(0)
 	if r.username != "" {
 		method = 2
 	}
 	if _, e := c.Write([]byte{5, 1, method}); e != nil {
-		return fail
+		return transportFailure(stageSOCKSHandshake, e, false)
 	}
 	var response [2]byte
-	if _, e := io.ReadFull(c, response[:]); e != nil || response[0] != 5 || response[1] != method {
+	if e := readSOCKSFrame(c, response[:]); e != nil {
+		return e
+	}
+	if response[0] != 5 || response[1] != method {
 		return fail
 	}
+	done(nil)
 	if method == 2 {
+		done = beginProbeStage(ctx, r.probeStage(diagnosticSOCKSAuth))
 		auth := []byte{1, byte(len(r.username))}
 		auth = append(auth, r.username...)
 		auth = append(auth, byte(len(r.password)))
 		auth = append(auth, r.password...)
 		if _, e := c.Write(auth); e != nil {
+			return transportFailure(stageSOCKSHandshake, e, false)
+		}
+		if e := readSOCKSFrame(c, response[:]); e != nil {
+			return e
+		}
+		if response[0] != 1 || response[1] != 0 {
 			return fail
 		}
-		if _, e := io.ReadFull(c, response[:]); e != nil || response[0] != 1 || response[1] != 0 {
-			return fail
-		}
+		done(nil)
 	}
-	host, port, e := targetAddress(address)
+	done = beginProbeStage(ctx, r.probeStage(diagnosticSOCKSConnect))
+	host, port, e := net.SplitHostPort(address)
 	if e != nil {
 		return fail
 	}
@@ -108,10 +161,13 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	request = append(request, a[:]...)
 	request = binary.BigEndian.AppendUint16(request, uint16(n))
 	if _, e = c.Write(request); e != nil {
-		return fail
+		return transportFailure(stageSOCKSHandshake, e, false)
 	}
 	var head [4]byte
-	if _, e = io.ReadFull(c, head[:]); e != nil || head[0] != 5 || head[2] != 0 {
+	if e := readSOCKSFrame(c, head[:]); e != nil {
+		return e
+	}
+	if head[0] != 5 || head[2] != 0 {
 		return fail
 	}
 	var size int
@@ -151,4 +207,16 @@ func (r *upstreamRoute) socksConnect(c net.Conn, address string) error {
 	default:
 		return &upstreamError{"SOCKS5 代理返回一般故障或不支持的连接响应"}
 	}
+}
+
+func readSOCKSFrame(c io.Reader, frame []byte) error {
+	n, err := io.ReadFull(c, frame)
+	if err == nil {
+		return nil
+	}
+	if n == 0 {
+		return transportFailure(stageSOCKSHandshake, err, false)
+	}
+	// A partial protocol frame is not a validated response or a mere idle close.
+	return &upstreamError{"SOCKS5 代理握手或认证失败"}
 }
